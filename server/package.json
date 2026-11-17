@@ -1,6 +1,7 @@
 {
   "name": "ai-tab-organizer-server",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "本地标签分组服务：Multi-Agent CLI（codex / claude）/ Ollama / OpenAI 兼容端点",
