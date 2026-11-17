@@ -1,0 +1,16 @@
+# Dependencies & caches
+server/node_modules/
+server/.npm-cache/
+server/.codex-home/
+server/.tab-analysis-cache.json
+server/.cli-preferences.json
+
+# Logs & OS files
+*.log
+.DS_Store
+
+# Temporary browser profiles, QA screenshots & generated scripts
+.chrome-qa/
+.brave-*/
+qa-shots/
+scripts/native-host.sh

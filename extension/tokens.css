@@ -1,0 +1,254 @@
+/* ==========================================================================
+   AI 标签工作台 · Dusk 改版设计 Token 系统（1:1 对应改版设计稿 OKLCH 色彩与毛玻璃）
+   ========================================================================== */
+
+:root {
+  /* 改版设计稿核心 OKLCH 色板 */
+  --dusk-paper: oklch(17.5% 0.014 268);
+  --dusk-paper-2: oklch(21% 0.016 268);
+  --dusk-paper-3: oklch(25% 0.017 268);
+  --dusk-card: oklch(23% 0.018 268);
+  --dusk-ink: oklch(96% 0.006 75);
+  --dusk-ink-2: oklch(85% 0.010 262);
+  --dusk-muted: oklch(70% 0.016 262);
+  --dusk-rule: oklch(30% 0.016 266);
+  --dusk-light: oklch(100% 0 0);
+  --dusk-shade: oklch(10% 0.022 268);
+  --dusk-accent: oklch(77% 0.10 274);
+  --dusk-accent-hi: oklch(84% 0.085 274);
+  --dusk-accent-deep: oklch(44% 0.13 274);
+  --dusk-btn-hover: oklch(50% 0.13 274);
+  --dusk-amber: oklch(83% 0.095 62);
+  --dusk-sage: oklch(80% 0.07 160);
+
+  /* 字体栈 */
+  --font-display: "Wix Madefor Display", "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-body: "Wix Madefor Text", "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-outlier: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-outlier);
+
+  --display-weight: 500;
+  --tracking-display: -0.022em;
+
+  /* 字号标尺 */
+  --text-xs: 11.5px;
+  --text-sm: 12.5px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 15.5px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --text-3xl: 26px;
+  --text-title: 16px;
+  --text-section: 20px;
+  --text-display: 26px;
+  --text-lead: 14px;
+
+  /* 空间节奏 */
+  --space-3xs: 3px;
+  --space-2xs: 6px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 22px;
+  --space-xl: 28px;
+  --space-2xl: 36px;
+  --space-3xl: 48px;
+
+  --container: 1280px;
+  --gutter: 24px;
+  --rule-hair: 1px;
+
+  /* 圆角与毛玻璃 */
+  --radius-input: 10px;
+  --radius-inner: 10px;
+  --radius-card: 16px;
+  --radius-pill: 999px;
+  --cut-l: 16px;
+
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 16px;
+  --r-pill: 999px;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-micro: 130ms;
+  --dur-short: 200ms;
+  --dur-long: 320ms;
+  --dur-fast: 130ms;
+  --dur-base: 200ms;
+
+  --z-sticky-nav: 30;
+  --z-modal: 100;
+  --z-toast: 200;
+
+  --icon-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b94a5' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E");
+  --icon-search: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238b94a5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E");
+}
+
+/* ---------------- 默认深色模式：Dusk Slate & Smoked Glass ---------------- */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-paper: oklch(17.5% 0.014 268);
+  --color-paper-2: oklch(21% 0.016 268);
+  --color-paper-3: oklch(25% 0.017 268);
+  --color-key-face: oklch(21% 0.016 268);
+  --color-ink: oklch(96% 0.006 75);
+  --color-ink-2: oklch(85% 0.010 262);
+  --color-muted: oklch(70% 0.016 262);
+  --color-rule: color-mix(in oklab, oklch(100% 0 0) 7.5%, transparent);
+  --color-rule-2: color-mix(in oklab, oklch(100% 0 0) 15%, transparent);
+
+  --color-accent: oklch(44% 0.13 274);
+  --color-accent-2: oklch(80% 0.07 160);
+  --color-accent-deep: oklch(77% 0.10 274);
+  --color-accent-ink: oklch(100% 0 0);
+  --color-accent-edge: color-mix(in oklab, oklch(100% 0 0) 10%, transparent);
+  --color-accent-wash: color-mix(in oklab, oklch(77% 0.10 274) 14%, transparent);
+  --color-focus: oklch(80% 0.10 274);
+
+  --color-success: oklch(80% 0.07 160);
+  --color-error: oklch(83% 0.095 62);
+  --color-toast-error: #ff8f8f;
+  --color-graphite: oklch(10% 0.022 268);
+  --color-graphite-ink: oklch(96% 0.006 75);
+  --hover-brightness: 1.08;
+
+  /* 改版设计稿专属变量 */
+  --bg: var(--color-paper);
+  --bg-soft: var(--color-paper-2);
+  --panel: var(--color-paper-2);
+  --card: oklch(23% 0.018 268);
+  --border: color-mix(in oklab, oklch(100% 0 0) 7.5%, transparent);
+  --border-strong: color-mix(in oklab, oklch(100% 0 0) 15%, transparent);
+  --text: var(--color-ink);
+  --text-2: var(--color-ink-2);
+  --text-3: var(--color-muted);
+  --blue: oklch(77% 0.10 274);
+  --blue-deep: oklch(84% 0.085 274);
+  --blue-soft: color-mix(in oklab, oklch(77% 0.10 274) 14%, transparent);
+  --hover: color-mix(in oklab, oklch(100% 0 0) 5.5%, transparent);
+  --chip: color-mix(in oklab, oklch(100% 0 0) 7.5%, transparent);
+  --input-bg: color-mix(in oklab, oklch(100% 0 0) 5%, transparent);
+  --green: oklch(80% 0.07 160);
+  --signal-2: oklch(83% 0.095 62);
+  --btn-bg: oklch(44% 0.13 274);
+  --btn-hover: oklch(50% 0.13 274);
+  --btn-ink: oklch(100% 0 0);
+  --glass-bg: oklch(22% 0.018 268 / 0.56);
+  --glass-fade: oklch(22.5% 0.018 268 / 0.95);
+  --glass-filter: blur(30px) saturate(1.25);
+  --glass-hi: inset 0 1px 0 color-mix(in oklab, oklch(100% 0 0) 13%, transparent), inset 0 0 0 1px color-mix(in oklab, oklch(100% 0 0) 7%, transparent);
+  --ambient:
+    radial-gradient(920px 640px at 6% -14%, color-mix(in oklab, oklch(77% 0.10 274) 13%, transparent), transparent 62%),
+    radial-gradient(900px 720px at 110% 114%, color-mix(in oklab, oklch(83% 0.095 62) 9%, transparent), transparent 62%);
+
+  --shadow-card: var(--glass-hi), 0 16px 34px -20px oklch(8% 0.02 268 / 0.55);
+  --shadow-key: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-key-press: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-key-mini: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --shadow-key-accent: inset 0 1px 0 color-mix(in oklab, oklch(100% 0 0) 16%, transparent), 0 2px 6px rgba(0, 0, 0, 0.32);
+
+  --bg-canvas: var(--bg);
+  --bg-elevated: var(--panel);
+  --bg-subtle: var(--color-paper-3);
+  --bg-hover: var(--hover);
+  --fg-primary: var(--text);
+  --fg-secondary: var(--text-2);
+  --fg-muted: var(--text-3);
+  --border-subtle: var(--border);
+  --border-default: var(--border-strong);
+  --accent: var(--blue);
+  --accent-soft: var(--blue-soft);
+  --accent-ring: color-mix(in oklab, var(--blue) 35%, transparent);
+  --ok: var(--green);
+  --warn: var(--signal-2);
+  --warn-soft: color-mix(in oklab, var(--signal-2) 15%, transparent);
+  --warn-border: color-mix(in oklab, var(--signal-2) 40%, transparent);
+}
+
+/* ---------------- 浅色模式：Warm Fog / Bone ---------------- */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --color-paper: oklch(94% 0.012 70);
+  --color-paper-2: oklch(99.5% 0.003 75);
+  --color-paper-3: oklch(92% 0.010 75);
+  --color-key-face: oklch(99.5% 0.003 75);
+  --color-ink: oklch(22% 0.022 268);
+  --color-ink-2: oklch(31% 0.020 266);
+  --color-muted: oklch(38% 0.022 266);
+  --color-rule: oklch(87.5% 0.009 75);
+  --color-rule-2: oklch(83% 0.011 75);
+
+  --color-accent: oklch(44% 0.13 274);
+  --color-accent-2: oklch(50% 0.09 160);
+  --color-accent-deep: oklch(44% 0.13 274);
+  --color-accent-ink: oklch(100% 0 0);
+  --color-accent-edge: oklch(38% 0.13 274);
+  --color-accent-wash: oklch(91% 0.038 274);
+  --color-focus: oklch(44% 0.13 274);
+
+  --color-success: oklch(50% 0.09 160);
+  --color-error: oklch(52% 0.115 55);
+  --color-toast-error: #ff8086;
+  --color-graphite: oklch(22% 0.022 268);
+  --color-graphite-ink: oklch(94% 0.012 70);
+  --hover-brightness: 0.98;
+
+  --bg: var(--color-paper);
+  --bg-soft: var(--color-paper-3);
+  --panel: var(--color-paper-2);
+  --card: var(--color-paper-2);
+  --border: var(--color-rule);
+  --border-strong: var(--color-rule-2);
+  --text: var(--color-ink);
+  --text-2: var(--color-ink-2);
+  --text-3: var(--color-muted);
+  --blue: oklch(44% 0.13 274);
+  --blue-deep: oklch(37% 0.13 274);
+  --blue-soft: oklch(91% 0.038 274);
+  --hover: oklch(22% 0.022 268 / 0.045);
+  --chip: oklch(92% 0.010 75);
+  --input-bg: oklch(99.5% 0.003 75);
+  --green: oklch(50% 0.09 160);
+  --signal-2: oklch(52% 0.115 55);
+  --btn-bg: oklch(44% 0.13 274);
+  --btn-hover: oklch(38% 0.13 274);
+  --btn-ink: oklch(100% 0 0);
+  --glass-bg: color-mix(in oklab, oklch(99.5% 0.003 75) 74%, transparent);
+  --glass-fade: color-mix(in oklab, oklch(99.5% 0.003 75) 96%, transparent);
+  --glass-filter: blur(30px) saturate(1.25);
+  --glass-hi: inset 0 1px 0 color-mix(in oklab, oklch(100% 0 0) 65%, transparent);
+  --ambient:
+    radial-gradient(920px 640px at 6% -14%, color-mix(in oklab, oklch(77% 0.10 274) 18%, transparent), transparent 62%),
+    radial-gradient(900px 720px at 110% 114%, color-mix(in oklab, oklch(83% 0.095 62) 14%, transparent), transparent 62%);
+
+  --shadow-card: 0 1px 2px oklch(22% 0.022 268 / 0.05), 0 16px 34px -20px oklch(22% 0.022 268 / 0.14);
+  --shadow-key: 0 1px 2px rgba(20, 23, 32, 0.06);
+  --shadow-key-press: inset 0 1px 2px rgba(20, 23, 32, 0.08);
+  --shadow-key-mini: 0 1px 3px rgba(20, 23, 32, 0.08);
+  --shadow-key-accent: 0 2px 6px rgba(67, 79, 209, 0.24);
+
+  --bg-canvas: var(--bg);
+  --bg-elevated: var(--panel);
+  --bg-subtle: var(--color-paper-3);
+  --bg-hover: var(--hover);
+  --fg-primary: var(--text);
+  --fg-secondary: var(--text-2);
+  --fg-muted: var(--text-3);
+  --border-subtle: var(--border);
+  --border-default: var(--border-strong);
+  --accent: var(--blue);
+  --accent-soft: var(--blue-soft);
+  --accent-ring: color-mix(in oklab, var(--blue) 28%, transparent);
+  --ok: var(--green);
+  --warn: var(--signal-2);
+  --warn-soft: color-mix(in oklab, var(--signal-2) 12%, transparent);
+  --warn-border: color-mix(in oklab, var(--signal-2) 32%, transparent);
+}

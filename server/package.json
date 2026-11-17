@@ -1,0 +1,17 @@
+{
+  "name": "ai-tab-organizer-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "本地标签分组服务：Multi-Agent CLI（codex / claude）/ Ollama / OpenAI 兼容端点",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test-organize.mjs",
+    "service:install": "node ../scripts/service.mjs install",
+    "service:uninstall": "node ../scripts/service.mjs uninstall",
+    "service:status": "node ../scripts/service.mjs status"
+  },
+  "dependencies": {
+    "@zed-industries/codex-acp": "^0.16.0"
+  }
+}
