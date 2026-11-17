@@ -133,7 +133,14 @@ chrome.tabs.onUpdated.addListener((_id, info) => {
 /* ---------------- 设置 ---------------- */
 
 $('serviceUrl').onchange = async () => {
-  settings.serviceUrl = $('serviceUrl').value.trim() || DEFAULT_SERVICE;
+  const next = typeof normalizeLoopbackServiceUrl === 'function'
+    ? normalizeLoopbackServiceUrl($('serviceUrl').value)
+    : ($('serviceUrl').value.trim() || DEFAULT_SERVICE);
+  if ($('serviceUrl').value.trim() && next !== $('serviceUrl').value.trim().replace(/\/+$/, '')) {
+    $('serviceUrl').value = next;
+    toast('仅支持本机回环地址（127.0.0.1 / localhost）', 'err');
+  }
+  settings.serviceUrl = next;
   await chrome.storage.sync.set({ settings });
   refreshHealthPill($('health'));
   toast('服务地址已保存');

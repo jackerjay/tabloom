@@ -184,8 +184,21 @@ async function currentWindowId() {
   return win.id;
 }
 
+function safeLocalServiceUrl(raw) {
+  try {
+    const u = new URL(String(raw || DEFAULTS.serviceUrl).trim());
+    const host = u.hostname.toLowerCase();
+    if (!['http:', 'https:'].includes(u.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(host) || u.username || u.password) {
+      return DEFAULTS.serviceUrl;
+    }
+    return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return DEFAULTS.serviceUrl;
+  }
+}
+
 async function callService(settings, payload) {
-  const base = settings.serviceUrl.replace(/\/+$/, '');
+  const base = safeLocalServiceUrl(settings.serviceUrl);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 195000);
   let res;

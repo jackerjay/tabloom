@@ -264,7 +264,20 @@ async function listModels() {
     if (!cfg.baseUrl || !token) {
       return { models: [], current: cfg.model, backend: 'acp', note: '缺少网关地址或登录态，无法拉取模型目录' };
     }
-    const r = await fetchJSON(`${cfg.baseUrl.replace(/\/+$/, '')}/models`, {
+    let safeBaseUrl = null;
+    try {
+      const parsed = new URL(cfg.baseUrl);
+      const host = parsed.hostname.toLowerCase();
+      const isLoopback = ['127.0.0.1', 'localhost', '[::1]'].includes(host);
+      const isTrustedOpenAI = parsed.protocol === 'https:' && (host === 'api.openai.com' || host.endsWith('.openai.com') || host === 'chatgpt.com' || host.endsWith('.chatgpt.com'));
+      if (!parsed.username && !parsed.password && (isLoopback || isTrustedOpenAI)) {
+        safeBaseUrl = cfg.baseUrl.replace(/\/+$/, '');
+      }
+    } catch { /* invalid URL */ }
+    if (!safeBaseUrl) {
+      return { models: [], current: cfg.model, backend: 'acp', note: '网关地址未在可信范围，已拦截令牌发送' };
+    }
+    const r = await fetchJSON(`${safeBaseUrl}/models`, {
       headers: { authorization: `Bearer ${token}` }, timeout: 10000,
     }).catch(() => null);
     const arr = r?.data?.models || r?.data?.data || [];
@@ -287,8 +300,10 @@ async function listModels() {
   return { models: [], current: null, backend: null, note: '没有可用的模型后端' };
 }
 
+const MODEL_ID_RE = /^[A-Za-z0-9._:/@-]{1,120}$/;
+
 async function setModel(model) {
-  if (typeof model !== 'string' || !model.trim() || model.trim().length > 200) {
+  if (typeof model !== 'string' || !MODEL_ID_RE.test(model.trim())) {
     return { status: 400, json: { error: 'model 参数非法' } };
   }
   model = model.trim();
@@ -302,7 +317,7 @@ async function setModel(model) {
   if (backend?.type === 'acp') {
     const cfg = readCodexHomeConfig();
     if (!cfg.file) return { status: 400, json: { error: '未找到 .codex-home/config.toml' } };
-    const line = `model = "${model}"`;
+    const line = `model = ${JSON.stringify(model)}`;
     const text = /^model\s*=.*$/m.test(cfg.text)
       ? cfg.text.replace(/^model\s*=.*$/m, line)
       : `${line}\n${cfg.text}`;
@@ -785,7 +800,6 @@ async function getUpdateStatus({ fetchRemote = false } = {}) {
       version,
       daemonInstalled,
       nativeHostInstalled,
-      serverDir: __dirname,
       gitAvailable: false,
       hasUpdate: false,
       behindCount: 0,
@@ -793,7 +807,7 @@ async function getUpdateStatus({ fetchRemote = false } = {}) {
       message: `当前版本 v${version} · 开发者模式本地目录（${daemonInstalled ? 'LaunchAgent 常驻已启用' : '手动进程在线，127.0.0.1:8787'}）`,
     };
   }
-  if (fetchRemote) {
+  if (fetchRemote && process.env.TABLOOM_ALLOW_AUTO_UPDATE === '1') {
     await execGit(['fetch', '--quiet'], 10000);
   }
   const branchRes = await execGit(['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -805,18 +819,24 @@ async function getUpdateStatus({ fetchRemote = false } = {}) {
     branch: branchRes.stdout || 'main',
     daemonInstalled,
     nativeHostInstalled,
-    serverDir: __dirname,
     gitAvailable: true,
     hasUpdate: behindCount > 0,
     behindCount,
     checkedAt: new Date().toISOString(),
     message: behindCount > 0
-      ? `检测到远端有 ${behindCount} 个新提交，可一键拉取并热重载扩展`
+      ? `检测到远端有 ${behindCount} 个新提交，请在本地终端运行 git pull 更新`
       : `当前已是最新版本 v${version}（分支 ${branchRes.stdout || 'main'}）`,
   };
 }
 
 async function applyUpdate() {
+  if (process.env.TABLOOM_ALLOW_AUTO_UPDATE !== '1') {
+    return {
+      ok: false,
+      disabled: true,
+      error: '为安全起见默认禁用 HTTP 自动 git pull，请在本地终端运行 git pull 后手动刷新扩展。',
+    };
+  }
   const status = await getUpdateStatus({ fetchRemote: true });
   if (!status.gitAvailable) {
     return {
@@ -857,18 +877,58 @@ function readBody(req, limit = 2 * 1024 * 1024) {
   });
 }
 
+const MAX_CONCURRENT_ORGANIZE = 2;
+const MAX_ASYNC_JOBS = 20;
+let activeOrganizeCount = 0;
+
+function isLoopbackHost(hostHeader) {
+  const host = String(hostHeader || '').trim().toLowerCase();
+  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host);
+}
+
+function isAllowedOrigin(originHeader) {
+  const origin = String(originHeader || '').trim();
+  if (!origin) return null;
+  if (/^(chrome|edge|moz)-extension:\/\/[a-z0-9-]+$/i.test(origin)) return origin;
+  if (/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(origin)) return origin;
+  return false;
+}
+
+function sanitizeBackend(backend) {
+  if (!backend) return null;
+  const { command: _omit, ...rest } = backend;
+  return rest;
+}
+
 const server = http.createServer(async (req, res) => {
+  const remoteIp = String(req.socket?.remoteAddress || '');
+  const isLoopbackPeer = !remoteIp || remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1';
+  if (!isLoopbackPeer || !isLoopbackHost(req.headers.host)) {
+    res.writeHead(403, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(JSON.stringify({ error: '仅允许本机回环地址访问' }));
+    return;
+  }
+  const originCheck = isAllowedOrigin(req.headers.origin);
+  if (originCheck === false) {
+    res.writeHead(403, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(JSON.stringify({ error: '未授权的请求来源 (Origin)' }));
+    return;
+  }
   const send = (status, json) => {
-    res.writeHead(status, {
+    const headers = {
       'content-type': 'application/json; charset=utf-8',
-      'access-control-allow-origin': '*',
-      'access-control-allow-methods': 'GET, POST, OPTIONS',
-      'access-control-allow-headers': 'content-type, authorization',
+      'vary': 'Origin',
       'cache-control': 'no-store',
-    });
+    };
+    if (originCheck) {
+      headers['access-control-allow-origin'] = originCheck;
+      headers['access-control-allow-methods'] = 'GET, POST, OPTIONS';
+      headers['access-control-allow-headers'] = 'content-type';
+    }
+    res.writeHead(status, headers);
     res.end(JSON.stringify(json));
   };
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
   if (req.method === 'OPTIONS') return send(204, {});
   try {
     if (req.method === 'GET' && url.pathname === '/health') {
@@ -884,10 +944,9 @@ const server = http.createServer(async (req, res) => {
         version: readExtensionVersion(),
         daemonInstalled: existsSync(plistPath),
         nativeHostInstalled: hasNativeHostInstalled(),
-        serverDir: __dirname,
         ai: !!(backend && backend.model),
         currentModel: backend?.type === 'acp' ? readCodexHomeConfig().model : (runtimeModelOverride || backend?.model || null),
-        backend: backend ? { ...backend, ...extra } : null,
+        backend: backend ? { ...sanitizeBackend(backend), ...extra } : null,
       });
     }
     if (req.method === 'GET' && url.pathname === '/clis') {
@@ -927,15 +986,20 @@ const server = http.createServer(async (req, res) => {
       return send(200, await getUpdateStatus({ fetchRemote }));
     }
     if (req.method === 'POST' && url.pathname === '/update/apply') {
-      return send(200, await applyUpdate());
+      const updateRes = await applyUpdate();
+      return send(updateRes.disabled ? 403 : 200, updateRes);
     }
     if (req.method === 'POST' && url.pathname === '/jobs/organize') {
+      if (asyncJobs.size >= MAX_ASYNC_JOBS || activeOrganizeCount >= MAX_CONCURRENT_ORGANIZE) {
+        return send(429, { error: '本地整理队列繁忙，请稍候重试' });
+      }
       let body;
       try { body = JSON.parse(await readBody(req) || '{}'); }
       catch { return send(400, { error: '请求体不是合法 JSON' }); }
       const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const job = { id: jobId, status: 'running', createdAt: Date.now(), result: null, error: null };
       asyncJobs.set(jobId, job);
+      activeOrganizeCount++;
       organize(body).then(({ status, json }) => {
         job.status = status === 200 ? 'succeeded' : 'failed';
         job.httpStatus = status;
@@ -945,7 +1009,7 @@ const server = http.createServer(async (req, res) => {
         job.status = 'failed';
         job.error = String(err?.message || err);
         setTimeout(() => asyncJobs.delete(jobId), 5 * 60_000);
-      });
+      }).finally(() => { activeOrganizeCount = Math.max(0, activeOrganizeCount - 1); });
       return send(202, { ok: true, jobId, status: 'running' });
     }
     if (req.method === 'GET' && url.pathname.startsWith('/jobs/')) {
@@ -971,14 +1035,22 @@ const server = http.createServer(async (req, res) => {
       });
     }
     if (req.method === 'POST' && url.pathname === '/organize') {
+      if (activeOrganizeCount >= MAX_CONCURRENT_ORGANIZE) {
+        return send(429, { error: '本地整理队列繁忙，请稍候重试' });
+      }
       let body;
       try { body = JSON.parse(await readBody(req) || '{}'); }
       catch { return send(400, { error: '请求体不是合法 JSON' }); }
-      const { status, json } = await organize(body);
-      if (status === 200) {
-        console.log(`[organize] ${body.tabs.length} tabs -> ${json.groups.length} groups (${json.source}, ${json.elapsedMs}ms)`);
+      activeOrganizeCount++;
+      try {
+        const { status, json } = await organize(body);
+        if (status === 200) {
+          console.log(`[organize] ${body.tabs.length} tabs -> ${json.groups.length} groups (${json.source}, ${json.elapsedMs}ms)`);
+        }
+        return send(status, json);
+      } finally {
+        activeOrganizeCount = Math.max(0, activeOrganizeCount - 1);
       }
-      return send(status, json);
     }
     return send(404, { error: 'not found' });
   } catch (e) {

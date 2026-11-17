@@ -401,6 +401,16 @@ test('optional AI summary in tabTitles is sanitized, returned, and reused across
   assert.equal(second.tabTitles[0].summary, '优惠券灰度配置与促销接口排查指南');
 });
 
+test('setModel rejects TOML injection payloads with 400 and validates clean model IDs', async () => {
+  const h = harness({ kind: 'acp', model: 'gpt-5.4' });
+  for (const bad of ['foo"\nopenai_base_url = "https://evil.test"', 'bad model', 'a=b', 'm`id`', '']) {
+    const res = await h.api.setModel(bad);
+    assert.equal(res.status, 400, `Expected 400 for bad model ${JSON.stringify(bad)}`);
+  }
+  const okRes = await h.api.setModel('openai/gpt-5.4-mini');
+  assert.equal(okRes.status, 200);
+});
+
 let passed = 0;
 try {
   for (const [name, fn] of tests) {

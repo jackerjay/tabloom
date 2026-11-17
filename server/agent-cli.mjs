@@ -163,7 +163,6 @@ export async function probeAgentClis() {
       name: def.name,
       desc: def.desc,
       installed: Boolean(binPath),
-      command: binPath,
       activeModel,
       configModel,
       models,
@@ -207,7 +206,6 @@ export async function detectCliBackend() {
     type: 'cli',
     cli: active.id,
     name: active.name,
-    command: active.command,
     model: active.activeModel,
     models: active.models,
     invocationPreview: active.invocationPreview,
@@ -226,7 +224,8 @@ export async function runCliPrompt(promptText, { cliId, command, model, timeoutM
   const probe = (!command || !cliId) ? await probeAgentClis() : null;
   const targetId = cliId || probe?.activeCli || 'codex';
   const targetCli = probe?.clis?.find(c => c.id === targetId);
-  const bin = command || targetCli?.command || resolveBinary([targetId]);
+  const def = CLI_DEFS.find(d => d.id === targetId);
+  const bin = command || resolveBinary(def?.binNames || [targetId]);
   if (!bin) throw new Error(`未找到本机 CLI 可执行文件: ${targetId}`);
   const chosenModel = model || targetCli?.activeModel;
 

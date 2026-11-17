@@ -40,7 +40,7 @@
 | --- | --- | --- |
 | **Tab overload & messy groups** | Right-clicking to group manually breaks down as soon as you switch tasks | Connects to local read-only AI CLIs (`codex` / `claude`) or local endpoints (Ollama / OpenAI-compatible) to sync native Chrome tab groups semantically; supports **manual pinned group names** (protected from future AI renames) and active work-group pinning |
 | **Accidental group deletion** | Bulk cleanup risks deleting key work tabs; closed tabs are hard to recover | **Per-group lock toggle** (blocks auto-cleanup, dedup, and AI reassignment); every group offers two quick-close actions: **Save & Close (Reopenable Archive)** or **Dissolve & Close All Tabs** |
-| **Slow tab, bookmark & URL lookup** | Hunting tab-by-tab, or clicking into tabs just to copy a URL | **`⌘K` Command Palette** auto-focuses immediately on open, with **smart direct URL jump**, **one-click Copy URL (`⌘C` / `⌘⇧C`)**, and `b ` (Bookmarks) / `h ` (History) / `g ` (Google) prefixes running 100% locally in milliseconds |
+| **Slow tab, bookmark & URL lookup** | Hunting tab-by-tab, or clicking into tabs just to copy a URL | **`⌘K` Command Palette** auto-focuses immediately on open, with **smart direct URL jump**, **one-click Copy URL (`⌘C` / `⌘⇧C`)**, local millisecond `b ` (Bookmarks) / `h ` (History) lookup, plus explicit `g ` Google Search shortcut |
 | **Masonry drag jitter & sidebar sync** | Multi-column cards snap awkwardly while dragging; sidebar falls out of sync on tab switch | Built with **SortableJS 1.15.7** (`220ms` animation debounce & `14px` hysteresis); Side Panel listens to window focus, visibility, and tab activation to scroll the active tab smoothly into center view |
 | **Duplicate tabs & memory bloat** | Pressing `⌘T` stacks duplicate workspaces; hibernated tabs look identical to active ones | `chrome.tabs.onCreated` intercepts duplicate URLs in real time and **enforces at most 1 New Tab / Workbench per window**; customizable idle hibernation (**5 min ~ 30 days**) adds a **dashed grey outer ring + Sleeping badge**, plus 7-day cleanup hints |
 | **Local privacy & speed** | Cloud tab managers require uploading full browsing history and credentials | **Local-First architecture**: Chrome Native Messaging wakes the local `127.0.0.1:8787` Node daemon & read-only CLI on demand; AI short titles and summaries are cached locally (`< 5ms` reuse) |
@@ -183,12 +183,14 @@ npm install
 node server.mjs
 ```
 
-To let the extension wake the daemon automatically via LaunchAgent + Chrome Native Messaging:
+To let the extension wake the daemon automatically via macOS LaunchAgent + Chrome Native Messaging (Linux/Windows users simply run `node server.mjs`):
 
 ```bash
 cd server
 npm run service:install
 ```
+
+> **Permissions note:** `<all_urls>` and `scripting` are used strictly on demand to extract the active page's short snippet for semantic grouping and to mount the optional shadow-DOM floating `⌘K` pill (`127.0.0.1`-only daemon with strict `Host`/`Origin` validation).
 
 Once running, the top-right status badge switches to **Daemon Online** alongside your active local CLI / model.
 

@@ -1240,16 +1240,9 @@ function toast(msg, kind = 'info') {
 const NATIVE_HOST_NAME = 'com.aitab.organizer';
 
 async function buildDaemonInstallCommand() {
-  let serverDir = '';
-  try {
-    const { lastKnownServerDir } = await chrome.storage.local.get('lastKnownServerDir');
-    if (lastKnownServerDir) serverDir = lastKnownServerDir;
-  } catch { /* ignore */ }
   const runtimeId = chrome?.runtime?.id || '';
   const originFlag = runtimeId ? ` -- --origin chrome-extension://${runtimeId}/` : '';
-  return serverDir
-    ? `cd "${serverDir}" && npm run service:install${originFlag}`
-    : `cd "<项目目录>/server" && npm run service:install${originFlag}`;
+  return `cd "<项目目录>/server" && npm run service:install${originFlag}`;
 }
 
 async function tryWakeLocalService() {
@@ -1488,9 +1481,6 @@ async function initUpdateCard({
     if (checkBtn) { checkBtn.disabled = true; checkBtn.textContent = '检查中…'; }
     try {
       const res = await apiFetch(`/update/status${fetchRemote ? '?fetch=1' : ''}`, { timeout: 10000 });
-      if (res.serverDir) {
-        try { chrome.storage?.local?.set({ lastKnownServerDir: res.serverDir }); } catch { /* ignore */ }
-      }
       if (dotEl) dotEl.className = 'service-dot ok';
       if (titleEl) {
         titleEl.textContent = res.daemonInstalled

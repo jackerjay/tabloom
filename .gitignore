@@ -9,8 +9,13 @@ server/.cli-preferences.json
 *.log
 .DS_Store
 
-# Temporary browser profiles, QA screenshots & generated scripts
+# Temporary browser profiles, QA screenshots & secrets
 .chrome-qa/
 .brave-*/
+.hallmark/
 qa-shots/
 scripts/native-host.sh
+.env*
+.npmrc
+*.pem
+*.key
