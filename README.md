@@ -20,7 +20,7 @@
 
 > With 60+ open tabs, your browser tab strip shrinks into unreadable favicons; the same technical doc or GitHub PR gets opened four or five times; finding a page you closed yesterday means digging endlessly through History; and your laptop fans spin up because you are afraid to close active work contexts.
 >
-> **TabLoom** restores a calm **"open to find, leave to lighten"** workflow — all tab organization, semantic search, and idle tab hibernation run in a **local-first loop** on your device without uploading browsing data to unrelated third-party clouds.
+> **TabLoom** restores a calm **"open to find, leave to lighten"** workflow — all tab, bookmark, and history search, grouping orchestration, and local caching run on your device (`127.0.0.1` daemon); choose local **Ollama** for 100% air-gapped inference, or **Codex / Claude CLI** using your own existing sessions.
 
 ## Live Walkthrough
 

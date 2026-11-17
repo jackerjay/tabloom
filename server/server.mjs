@@ -896,7 +896,13 @@ function isAllowedOrigin(originHeader) {
 
 function sanitizeBackend(backend) {
   if (!backend) return null;
-  const { command: _omit, ...rest } = backend;
+  const { command: _omit, baseUrl, ...rest } = backend;
+  if (typeof baseUrl === 'string' && baseUrl) {
+    try {
+      const u = new URL(baseUrl);
+      rest.baseUrl = `${u.protocol}//${u.host}`;
+    } catch { /* omit malformed baseUrl */ }
+  }
   return rest;
 }
 
@@ -958,10 +964,16 @@ const server = http.createServer(async (req, res) => {
       catch { return send(400, { error: '请求体不是合法 JSON' }); }
       const patch = {};
       if (typeof body.preferredCli === 'string' && body.preferredCli.trim()) {
-        patch.preferredCli = body.preferredCli.trim();
+        const cli = body.preferredCli.trim();
+        if (!['auto', 'codex', 'claude'].includes(cli)) {
+          return send(400, { error: 'preferredCli 参数非法' });
+        }
+        patch.preferredCli = cli;
       }
       if (typeof body.model === 'string' && body.model.trim() && patch.preferredCli && patch.preferredCli !== 'auto') {
-        patch.models = { [patch.preferredCli]: body.model.trim() };
+        const m = body.model.trim();
+        if (!MODEL_ID_RE.test(m)) return send(400, { error: 'model 参数非法' });
+        patch.models = { [patch.preferredCli]: m };
       }
       writeCliPreferences(patch);
       runtimeModelOverride = '';
@@ -990,12 +1002,18 @@ const server = http.createServer(async (req, res) => {
       return send(updateRes.disabled ? 403 : 200, updateRes);
     }
     if (req.method === 'POST' && url.pathname === '/jobs/organize') {
-      if (asyncJobs.size >= MAX_ASYNC_JOBS || activeOrganizeCount >= MAX_CONCURRENT_ORGANIZE) {
-        return send(429, { error: '本地整理队列繁忙，请稍候重试' });
-      }
       let body;
       try { body = JSON.parse(await readBody(req) || '{}'); }
       catch { return send(400, { error: '请求体不是合法 JSON' }); }
+      const runningJobs = [...asyncJobs.values()].filter(j => j.status === 'running').length;
+      if (runningJobs >= MAX_CONCURRENT_ORGANIZE || activeOrganizeCount >= MAX_CONCURRENT_ORGANIZE) {
+        return send(429, { error: '本地整理队列繁忙，请稍候重试' });
+      }
+      if (asyncJobs.size >= MAX_ASYNC_JOBS) {
+        for (const [k, v] of asyncJobs) {
+          if (v.status !== 'running') { asyncJobs.delete(k); break; }
+        }
+      }
       const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const job = { id: jobId, status: 'running', createdAt: Date.now(), result: null, error: null };
       asyncJobs.set(jobId, job);
@@ -1028,19 +1046,18 @@ const server = http.createServer(async (req, res) => {
           'GET /update/status', 'POST /update/apply',
         ],
         config: {
-          ACP_COMMAND: process.env.ACP_COMMAND || '(auto: multi-agent CLI codex/claude)',
-          LLM_BASE_URL: ENV_BASE || '(auto)',
-          LLM_MODEL: ENV_MODEL || '(first available)',
+          customAcpConfigured: Boolean(process.env.ACP_COMMAND),
+          customHttpBaseConfigured: Boolean(ENV_BASE),
         },
       });
     }
     if (req.method === 'POST' && url.pathname === '/organize') {
-      if (activeOrganizeCount >= MAX_CONCURRENT_ORGANIZE) {
-        return send(429, { error: '本地整理队列繁忙，请稍候重试' });
-      }
       let body;
       try { body = JSON.parse(await readBody(req) || '{}'); }
       catch { return send(400, { error: '请求体不是合法 JSON' }); }
+      if (activeOrganizeCount >= MAX_CONCURRENT_ORGANIZE) {
+        return send(429, { error: '本地整理队列繁忙，请稍候重试' });
+      }
       activeOrganizeCount++;
       try {
         const { status, json } = await organize(body);
