@@ -411,6 +411,30 @@ test('setModel rejects TOML injection payloads with 400 and validates clean mode
   assert.equal(okRes.status, 200);
 });
 
+test('buildMessages includes existingGroupAnchors, summaryHint for hibernated tabs, and preserves longer group names', async () => {
+  const h = harness({
+    respond: text => JSON.stringify({
+      groups: [{ name: 'Frontend Performance & Caching', color: 'pink', tabIds: tabsFromPrompt(text).map(t => t.id) }],
+      tabTitles: [],
+    }),
+  });
+  const hibernated = { id: 301, title: 'Web Vitals Dashboard', url: 'https://example.test/vitals', snippet: null, cachedSummary: 'LCP optimization & edge cache metrics' };
+  const res = await h.organize([hibernated], {
+    existingGroups: ['Frontend Performance & Caching'],
+    context: {
+      existingGroupAnchors: [
+        { name: 'Frontend Performance & Caching', pinned: true, samples: [{ title: 'React Compiler Guide', host: 'react.dev', summary: 'Automatic memoization docs' }] },
+      ],
+    },
+  });
+  assert.match(h.prompts[0].text, /已有项目\/分组绝对优先吸收/);
+  assert.match(h.prompts[0].text, /1~8 组/);
+  assert.match(h.prompts[0].text, /\[固定\] 「Frontend Performance & Caching」/);
+  assert.match(h.prompts[0].text, /React Compiler Guide/);
+  assert.match(h.prompts[0].text, /summaryHint.*LCP optimization/);
+  assert.equal(res.groups[0].name, 'Frontend Performance & Caching');
+});
+
 let passed = 0;
 try {
   for (const [name, fn] of tests) {

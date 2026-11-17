@@ -389,7 +389,11 @@ async function checkHomeAutoOrganize(windowId = null) {
   return { ok: true, windowId, shouldOrganize, ungroupedCount: curKeys.length, newCount: newKeys.length };
 }
 
-async function collectContext(target, all) {
+function normalizeGroupKey(name) {
+  return String(name || '').trim().toLowerCase().replace(/[\s·•・\-_—–/|&和与及、,:：]+/g, '');
+}
+
+async function collectContext(target, all, { existing = [], manualNamed = new Map(), locked = new Set() } = {}) {
   const bookmarkOf = new Map();
   const folders = [];
   try {
@@ -405,6 +409,12 @@ async function collectContext(target, all) {
     (await chrome.bookmarks.getTree()).forEach(n => walk(n, []));
   } catch { /* 无书签权限/空书签 */ }
   folders.sort((a, b) => b.count - a.count);
+
+  let tabMetaMap = {};
+  try {
+    const raw = (await chrome.storage?.local?.get?.(TAB_META_KEY))?.[TAB_META_KEY];
+    if (raw && typeof raw === 'object') tabMetaMap = raw;
+  } catch { /* ignore */ }
 
   const active = all.find(t => t.active) || null;
   const activeHttp = active && /^https?:\/\//.test(active.url || '') ? active : null;
@@ -426,11 +436,37 @@ async function collectContext(target, all) {
   };
   await Promise.all(Array.from({ length: Math.min(EXTRACT_CONCURRENCY, httpTabs.length) }, worker));
 
-  const enriched = target.map(t => ({
-    id: t.id, title: snippets.get(t.id)?.originalTitle ?? t.title, url: t.url,
-    bookmarkPath: bookmarkOf.get(normalizeUrl(t.url)) || null,
-    snippet: snippetText(snippets.get(t.id)) || null,
-  }));
+  const enriched = target.map(t => {
+    const liveSnippet = snippetText(snippets.get(t.id)) || null;
+    const cachedMeta = !liveSnippet ? tabMetaMap[normalizeUrl(t.url)] : null;
+    return {
+      id: t.id, title: cachedMeta?.title || snippets.get(t.id)?.originalTitle || t.title, url: t.url,
+      bookmarkPath: bookmarkOf.get(normalizeUrl(t.url)) || null,
+      snippet: liveSnippet,
+      ...(!liveSnippet && cachedMeta?.summary ? { cachedSummary: String(cachedMeta.summary).slice(0, 160) } : {}),
+    };
+  });
+  const safeHost = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+  const existingGroupAnchors = [...(existing || [])]
+    .filter(g => typeof g?.title === 'string' && g.title.trim())
+    .map(g => {
+      const pinned = manualNamed.has(g.id) || locked.has(g.id);
+      const samples = all
+        .filter(t => t.groupId === g.id && /^https?:\/\//.test(t.url || ''))
+        .slice(0, 6)
+        .map(t => {
+          const meta = tabMetaMap[normalizeUrl(t.url)];
+          const s = snippetText(snippets.get(t.id));
+          return {
+            title: String(meta?.title || t.title || '').replace(/\s+/g, ' ').trim().slice(0, 60),
+            host: safeHost(t.url),
+            ...(meta?.summary || s ? { summary: String(meta?.summary || s).replace(/\s+/g, ' ').trim().slice(0, 72) } : {}),
+          };
+        });
+      return { name: g.title.trim(), pinned, samples };
+    })
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.samples.length - a.samples.length)
+    .slice(0, 24);
   const activePageStatus = activeHttp ? 'active-webpage'
     : active ? 'non-http-active-previous-page-unknown' : 'no-active-tab';
   const context = {
@@ -443,6 +479,7 @@ async function collectContext(target, all) {
     } : null,
     bookmarkFolders: folders.slice(0, 40),
     bookmarkCount: bookmarkOf.size,
+    ...(existingGroupAnchors.length ? { existingGroupAnchors } : {}),
   };
   const metaUpdates = [];
   for (const t of httpTabs) {
@@ -480,7 +517,7 @@ async function organize({ apply = false, incremental = false, windowId = null, a
     return { ok: true, empty: true, cleanup, message: incremental ? '没有待整理的新标签页或内容变化' : '没有可整理的网页标签页' };
   }
   const existing = await chrome.tabGroups.query({ windowId });
-  const { enriched, context } = await collectContext(target, all);
+  const { enriched, context } = await collectContext(target, all, { existing, manualNamed, locked });
   const result = await callService(settings, {
     tabs: enriched, context, mode: incremental ? 'incremental' : 'full',
     existingGroups: existing.map(g => g.title), language: 'zh',
@@ -618,10 +655,12 @@ async function applyProposalNow(proposal) {
         && (!byId.get(id).pendingUrl || byId.get(id).pendingUrl === guards.get(id).url)))
       && !(proposal.incremental && hits.has(id) && previouslyGrouped.has(id)));
     // Prefer manually named group matching those tabs or matching target title, never overwriting manual titles.
-    const manualMatch = existing.find(e => manualNamed.has(e.id) && (e.title === g.name || ids.some(id => byId.get(id).groupId === e.id)));
+    const targetKey = normalizeGroupKey(g.name);
+    const manualMatch = existing.find(e => manualNamed.has(e.id) && (e.title === g.name || (targetKey && normalizeGroupKey(e.title) === targetKey) || ids.some(id => byId.get(id).groupId === e.id)));
     const match = manualMatch
       || existing.find(e => e.title === g.name && ids.every(id => byId.get(id).groupId === e.id))
-      || existing.find(e => e.title === g.name);
+      || existing.find(e => e.title === g.name)
+      || (targetKey ? existing.find(e => normalizeGroupKey(e.title) === targetKey) : null);
     const fixedTitle = match && manualNamed.has(match.id) ? manualNamed.get(match.id) : null;
     const targetTitle = fixedTitle ?? g.name;
     const moving = ids.filter(id => byId.get(id).groupId !== match?.id);
