@@ -2066,10 +2066,30 @@ async function initUpdateCard({
   copyCmdBtn,
   retryBtn,
   pillEl,
+  badgeEls = [],
   onServiceOnline,
 } = {}) {
   if (!statusEl) return null;
   let wasOffline = false;
+  const badges = (Array.isArray(badgeEls) ? badgeEls : [badgeEls]).filter(Boolean);
+  const paintBadges = res => {
+    const has = Boolean(res?.hasUpdate);
+    for (const el of badges) {
+      el.classList.toggle('hidden', !has);
+      const host = el.closest?.('button');
+      if (host) {
+        host.classList.toggle('has-update', has);
+        if (has) {
+          const hint = res.remoteCommit ? `发现新版本：${res.remoteCommit}` : '发现新版本，点击检查并一键升级';
+          el.title = hint;
+          if (!host.dataset.origTitle) host.dataset.origTitle = host.getAttribute('title') || '';
+          host.title = hint;
+        } else if (host.dataset.origTitle != null) {
+          host.title = host.dataset.origTitle;
+        }
+      }
+    }
+  };
 
   const paintOffline = async ({ showSetup = false } = {}) => {
     wasOffline = true;
@@ -2082,33 +2102,55 @@ async function initUpdateCard({
     if (cmdEl) cmdEl.textContent = await buildDaemonInstallCommand();
   };
 
+  const applyCheckResult = res => {
+    if (dotEl) dotEl.className = 'service-dot ok';
+    if (titleEl) {
+      titleEl.textContent = res.daemonInstalled
+        ? (res.nativeHostInstalled ? 'LaunchAgent 常驻 + Native 唤醒已就绪' : 'LaunchAgent 开机常驻已启用')
+        : (res.nativeHostInstalled ? '本机服务在线 · Native 唤醒已就绪' : '本机服务已在线（未启用开机常驻）');
+    }
+    statusEl.textContent = res.message || `当前版本 v${res.version || '0.4.0'}`;
+    if (actionsEl) actionsEl.classList.add('hidden');
+    if (setupBoxEl) setupBoxEl.classList.add('hidden');
+    if (applyBtn) {
+      applyBtn.classList.toggle('hidden', !res.hasUpdate);
+      if (res.hasUpdate) {
+        applyBtn.textContent = res.gitAvailable === false
+          ? '查看最新安装包说明'
+          : '↑ 立即拉取更新并重启重载';
+      }
+    }
+    paintBadges(res);
+    if (pillEl && pillEl.classList.contains('bad')) {
+      refreshHealthPill(pillEl);
+    }
+    if (wasOffline) {
+      wasOffline = false;
+      if (onServiceOnline) onServiceOnline(res);
+    }
+  };
+
   const check = async (fetchRemote = false) => {
     if (checkBtn) { checkBtn.disabled = true; checkBtn.textContent = '检查中…'; }
     try {
       const res = await apiFetch(`/update/status${fetchRemote ? '?fetch=1' : ''}`, { timeout: 10000 });
-      if (dotEl) dotEl.className = 'service-dot ok';
-      if (titleEl) {
-        titleEl.textContent = res.daemonInstalled
-          ? (res.nativeHostInstalled ? 'LaunchAgent 常驻 + Native 唤醒已就绪' : 'LaunchAgent 开机常驻已启用')
-          : (res.nativeHostInstalled ? '本机服务在线 · Native 唤醒已就绪' : '本机服务已在线（未启用开机常驻）');
+      applyCheckResult(res);
+      try {
+        chrome.storage?.local?.set?.({ updateStatusCache: { ...res, checkedAtMs: Date.now() } });
+      } catch { /* ignore */ }
+      if (fetchRemote) toast(res.hasUpdate ? '发现新版本，可点击一键拉取更新' : '当前已是最新版本', res.hasUpdate ? 'info' : 'ok');
+      else {
+        chrome.runtime?.sendMessage?.({ type: 'update-check-bg', force: false })?.then?.(bgRes => {
+          if (bgRes?.ok) applyCheckResult(bgRes);
+        })?.catch?.(() => {});
       }
-      statusEl.textContent = res.message || `当前版本 v${res.version || '0.4.0'}`;
-      if (actionsEl) actionsEl.classList.add('hidden');
-      if (setupBoxEl) setupBoxEl.classList.add('hidden');
-      if (applyBtn) {
-        applyBtn.classList.toggle('hidden', !res.hasUpdate);
-      }
-      if (pillEl && pillEl.classList.contains('bad')) {
-        refreshHealthPill(pillEl);
-      }
-      if (wasOffline) {
-        wasOffline = false;
-        if (onServiceOnline) onServiceOnline(res);
-      }
-      if (fetchRemote) toast(res.hasUpdate ? '发现新版本，可一键升级' : '当前已是最新版本', 'ok');
       return true;
     } catch {
       await paintOffline({ showSetup: setupBoxEl ? !setupBoxEl.classList.contains('hidden') : false });
+      try {
+        const cached = (await chrome.storage?.local?.get?.('updateStatusCache'))?.updateStatusCache;
+        if (cached?.hasUpdate) paintBadges(cached);
+      } catch { /* ignore */ }
       return false;
     } finally {
       if (checkBtn) { checkBtn.disabled = false; checkBtn.textContent = '检查更新'; }
@@ -2167,24 +2209,50 @@ async function initUpdateCard({
   if (applyBtn) {
     applyBtn.onclick = async () => {
       applyBtn.disabled = true;
-      applyBtn.textContent = '升级中…';
+      applyBtn.textContent = '拉取更新中…';
       try {
-        const res = await apiFetch('/update/apply', { method: 'POST', body: {}, timeout: 16000 });
+        const res = await apiFetch('/update/apply', { method: 'POST', body: { confirm: true }, timeout: 22000 });
         statusEl.textContent = res.message || '已更新';
+        if (!res.ok || res.applied === false) {
+          toast(res.message || '拉取未完成，请检查本地改动', 'err');
+          if (res.reloadExtension && res.gitAvailable === false && setupBoxEl) {
+            setupBoxEl.classList.remove('hidden');
+            if (cmdEl) cmdEl.textContent = await buildDaemonInstallCommand();
+          }
+          return;
+        }
+        try {
+          await chrome.storage?.local?.set?.({ updateStatusCache: { ...res, hasUpdate: false, behindCount: 0, checkedAtMs: Date.now() } });
+        } catch { /* ignore */ }
+        paintBadges({ hasUpdate: false });
+        applyBtn.classList.add('hidden');
         toast(res.message || '升级完成，正在重载扩展', 'ok');
         if (res.reloadExtension) {
-          chrome.runtime?.sendMessage?.({ type: 'reload-extension' });
+          const waitMs = res.daemonRestarting ? 750 : 120;
+          setTimeout(() => chrome.runtime?.sendMessage?.({ type: 'reload-extension' }), waitMs);
         }
       } catch (e) {
         toast(`升级失败：${e.message}`, 'err');
       } finally {
         applyBtn.disabled = false;
-        applyBtn.textContent = '立即拉取并热重载';
+        applyBtn.textContent = '↑ 立即拉取更新并重启重载';
       }
     };
   }
+  if (typeof chrome !== 'undefined' && chrome.storage?.onChanged?.addListener) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes.updateStatusCache?.newValue) {
+        const next = changes.updateStatusCache.newValue;
+        paintBadges(next);
+        if (next.ok && !wasOffline) {
+          statusEl.textContent = next.message || statusEl.textContent;
+          if (applyBtn) applyBtn.classList.toggle('hidden', !next.hasUpdate);
+        }
+      }
+    });
+  }
   await check(false);
-  return { reload: () => check(false), attemptWake, isOffline: () => wasOffline };
+  return { reload: () => check(false), checkRemote: () => check(true), attemptWake, isOffline: () => wasOffline };
 }
 
 /* ---------------- 主题：auto / light / dark ----------------

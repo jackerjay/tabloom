@@ -1396,6 +1396,7 @@ deckToggle.onclick = () => setDeck($('deck').classList.contains('hidden'));
       copyCmdBtn: $('svcCopyCmdBtn'),
       retryBtn: $('svcRetryBtn'),
       pillEl: $('health'),
+      badgeEls: [$('deckUpdateDot')],
       onServiceOnline: () => modelCtrl?.reload?.(),
     });
   }

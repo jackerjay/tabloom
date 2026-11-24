@@ -1008,6 +1008,35 @@ function execGit(args, timeout = 8000) {
   });
 }
 
+function compareSemver(a, b) {
+  const pa = String(a || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const da = pa[i] || 0;
+    const db = pb[i] || 0;
+    if (da !== db) return da > db ? 1 : -1;
+  }
+  return 0;
+}
+
+async function fetchPublicRemoteVersion() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    const res = await fetch('https://raw.githubusercontent.com/jackerjay/tabloom/main/extension/manifest.json', {
+      signal: ctrl.signal,
+    });
+    if (!res?.ok) return null;
+    const manifest = await res.json().catch(() => null);
+    const ver = String(manifest?.version || '').trim();
+    return /^\d+\.\d+\.\d+/.test(ver) ? ver : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getUpdateStatus({ fetchRemote = false } = {}) {
   const version = readExtensionVersion();
   const daemonInstalled = existsSync(plistPath);
@@ -1015,70 +1044,145 @@ async function getUpdateStatus({ fetchRemote = false } = {}) {
   const gitDir = path.join(repoRoot, '.git');
   const gitAvailable = existsSync(gitDir);
   if (!gitAvailable) {
+    let remoteVersion = null;
+    let hasUpdate = false;
+    if (fetchRemote) {
+      remoteVersion = await fetchPublicRemoteVersion();
+      if (remoteVersion && compareSemver(remoteVersion, version) > 0) hasUpdate = true;
+    }
     return {
       ok: true,
       version,
+      ...(remoteVersion ? { remoteVersion } : {}),
       daemonInstalled,
       nativeHostInstalled,
       gitAvailable: false,
-      hasUpdate: false,
-      behindCount: 0,
+      hasUpdate,
+      behindCount: hasUpdate ? 1 : 0,
       checkedAt: new Date().toISOString(),
-      message: `当前版本 v${version} · 开发者模式本地目录（${daemonInstalled ? 'LaunchAgent 常驻已启用' : '手动进程在线，127.0.0.1:8787'}）`,
+      message: hasUpdate
+        ? `发现 GitHub 新版本 v${remoteVersion}（当前 v${version}），非 Git 目录请运行 install.sh 升级`
+        : `当前版本 v${version} · 开发者模式本地目录（${daemonInstalled ? 'LaunchAgent 常驻已启用' : '手动进程在线，127.0.0.1:8787'}）`,
     };
   }
-  if (fetchRemote && process.env.TABLOOM_ALLOW_AUTO_UPDATE === '1') {
+  if (fetchRemote) {
     await execGit(['fetch', '--quiet'], 10000);
   }
   const branchRes = await execGit(['rev-parse', '--abbrev-ref', 'HEAD']);
-  const countRes = await execGit(['rev-list', '--count', 'HEAD..@{u}']);
-  const behindCount = countRes.ok ? Number(countRes.stdout) || 0 : 0;
+  const branch = branchRes.stdout || 'main';
+  let countRes = await execGit(['rev-list', '--count', 'HEAD..@{u}']);
+  let remoteRef = '@{u}';
+  if (!countRes.ok) {
+    countRes = await execGit(['rev-list', '--count', `HEAD..origin/${branch}`]);
+    remoteRef = `origin/${branch}`;
+  }
+  let behindCount = countRes.ok ? Number(countRes.stdout) || 0 : 0;
+  if (!countRes.ok && fetchRemote) {
+    const [headRes, lsRes] = await Promise.all([
+      execGit(['rev-parse', 'HEAD']),
+      execGit(['ls-remote', '--heads', 'origin', branch], 8000),
+    ]);
+    const remoteSha = String(lsRes.stdout || '').split(/\s+/)[0] || '';
+    if (lsRes.ok && remoteSha && headRes.ok && headRes.stdout && remoteSha !== headRes.stdout) {
+      behindCount = 1;
+      remoteRef = '';
+    }
+  }
+  let remoteCommit = '';
+  if (behindCount > 0 && remoteRef) {
+    const logRes = await execGit(['log', '-1', '--format=%h %s', remoteRef]);
+    if (logRes.ok && logRes.stdout) remoteCommit = logRes.stdout.replace(/\s+/g, ' ').trim().slice(0, 72);
+  }
   return {
     ok: true,
     version,
-    branch: branchRes.stdout || 'main',
+    branch,
     daemonInstalled,
     nativeHostInstalled,
     gitAvailable: true,
     hasUpdate: behindCount > 0,
     behindCount,
+    ...(remoteCommit ? { remoteCommit } : {}),
     checkedAt: new Date().toISOString(),
     message: behindCount > 0
-      ? `检测到远端有 ${behindCount} 个新提交，请在本地终端运行 git pull 更新`
-      : `当前已是最新版本 v${version}（分支 ${branchRes.stdout || 'main'}）`,
+      ? `检测到远端有 ${behindCount} 个新提交${remoteCommit ? `（${remoteCommit}）` : ''}，可一键拉取并重启加载`
+      : `当前已是最新版本 v${version}（分支 ${branch}）`,
   };
 }
 
-async function applyUpdate() {
-  if (process.env.TABLOOM_ALLOW_AUTO_UPDATE !== '1') {
+async function applyUpdate({ confirmed = false, serverRef = null } = {}) {
+  if (process.env.TABLOOM_ALLOW_AUTO_UPDATE === '0') {
     return {
       ok: false,
       disabled: true,
-      error: '为安全起见默认禁用 HTTP 自动 git pull，请在本地终端运行 git pull 后手动刷新扩展。',
+      applied: false,
+      reloadExtension: false,
+      daemonRestarting: false,
+      message: '已通过 TABLOOM_ALLOW_AUTO_UPDATE=0 禁用网页端拉取更新，请在终端执行 ~/tabloom/install.sh。',
     };
   }
   const status = await getUpdateStatus({ fetchRemote: true });
   if (!status.gitAvailable) {
     return {
       ...status,
+      ok: false,
       applied: false,
       reloadExtension: true,
-      message: `本地开发目录无 Git 远端，已触发扩展热重载（v${status.version}）`,
+      daemonRestarting: false,
+      message: `本地目录不含 .git 仓，请运行 ~/tabloom/install.sh 获取 v${status.remoteVersion || '最新'}`,
     };
   }
+  if (!confirmed) {
+    return {
+      ok: false,
+      applied: false,
+      reloadExtension: false,
+      daemonRestarting: false,
+      message: '请通过扩展界面点击确认升级按钮触发更新。',
+    };
+  }
+  const dirtyRes = await execGit(['status', '--porcelain'], 5000);
+  if (dirtyRes.ok && dirtyRes.stdout.trim()) {
+    return {
+      ok: false,
+      dirty: true,
+      applied: false,
+      reloadExtension: false,
+      daemonRestarting: false,
+      version: status.version,
+      message: '检测到本地工作区有未提交修改，为避免冲突已中止拉取；请先在终端处理后再试。',
+    };
+  }
+  const beforeHead = (await execGit(['rev-parse', 'HEAD'])).stdout;
   const pullRes = await execGit(['pull', '--ff-only'], 15000);
+  const afterHead = (await execGit(['rev-parse', 'HEAD'])).stdout;
   const nextVersion = readExtensionVersion();
+  const changed = Boolean(pullRes.ok && beforeHead && afterHead && beforeHead !== afterHead);
+  const daemonRestarting = Boolean(changed && status.daemonInstalled);
+  if (daemonRestarting) {
+    // LaunchAgent sets KeepAlive=true, so clean exit relaunches server.mjs with updated backend code.
+    setTimeout(() => {
+      try { serverRef?.close?.(); } catch { /* ignore */ }
+      process.exit(0);
+    }, 350);
+  }
   return {
     ok: pullRes.ok,
     version: nextVersion,
     daemonInstalled: status.daemonInstalled,
     gitAvailable: true,
-    hasUpdate: false,
+    hasUpdate: !pullRes.ok && status.hasUpdate,
     applied: pullRes.ok,
-    reloadExtension: true,
+    changed,
+    reloadExtension: pullRes.ok,
+    daemonRestarting,
     checkedAt: new Date().toISOString(),
     message: pullRes.ok
-      ? `已更新至 v${nextVersion}，正在热重载扩展`
+      ? (changed
+        ? (daemonRestarting
+          ? `已拉取更新 v${nextVersion}，正在重启守护进程并热重载扩展`
+          : `已拉取更新 v${nextVersion}，正在热重载扩展（若改过服务代码请在终端重启守护）`)
+        : `当前已是最新版本 v${nextVersion}，已触发扩展重载`)
       : `Git 拉取未完成：${pullRes.stderr || pullRes.stdout || '请检查本地工作区修改'}`,
   };
 }
@@ -1218,8 +1322,15 @@ const server = http.createServer(async (req, res) => {
       return send(200, await getUpdateStatus({ fetchRemote }));
     }
     if (req.method === 'POST' && url.pathname === '/update/apply') {
-      const updateRes = await applyUpdate();
-      return send(updateRes.disabled ? 403 : 200, updateRes);
+      const origin = String(req.headers.origin || '').trim();
+      if (!origin.startsWith('chrome-extension://')) {
+        return send(403, { ok: false, error: '仅允许来自已授权扩展界面的更新请求' });
+      }
+      let body = {};
+      try { body = JSON.parse(await readBody(req) || '{}'); } catch { /* ignore */ }
+      const updateRes = await applyUpdate({ confirmed: body?.confirm === true, serverRef: server });
+      const code = updateRes.disabled ? 403 : updateRes.ok ? 200 : (updateRes.dirty ? 409 : 400);
+      return send(code, updateRes);
     }
     if (url.pathname === '/snapshot' || url.pathname === '/groups' || url.pathname === '/tabs' || url.pathname.startsWith('/tabs/') || url.pathname === '/audit' || url.pathname === '/whitelist/suggest' || url.pathname === '/aggregation/suggest') {
       const origin = String(req.headers.origin || '').trim();

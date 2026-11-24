@@ -19,6 +19,10 @@ const DEFAULTS = {
 };
 const AUTO_ALARM = 'ai-tab-auto-organize';
 const DISCARD_ALARM = 'ai-tab-auto-discard';
+const UPDATE_CHECK_ALARM = 'ai-tab-update-check';
+const UPDATE_STATUS_KEY = 'updateStatusCache';
+const UPDATE_CHECK_PERIOD_MINUTES = 360;
+const UPDATE_CHECK_THROTTLE_MS = 30 * 60 * 1000;
 const LOCKED_GROUPS_KEY = 'lockedGroupIds';
 const MANUAL_NAMED_GROUPS_KEY = 'manualNamedGroups';
 const MANUAL_TAB_TITLES_KEY = 'manualTabTitles';
@@ -3937,6 +3941,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         setTimeout(() => { try { chrome.runtime.reload?.(); } catch { /* ignore */ } }, 150);
         return { ok: true };
       }
+      case 'update-check-bg': {
+        requireLifecycleSender(sender);
+        return await checkRemoteUpdate({ force: Boolean(msg?.force) });
+      }
       case 'state': {
         const { proposal, undo, lastInterceptedDup } = await chrome.storage.session.get(['proposal', 'undo', 'lastInterceptedDup']);
         return { ok: true, proposal: proposal || null, hasUndo: !!undo, lastInterceptedDup: lastInterceptedDup || null, settings: await getSettings() };
@@ -4348,9 +4356,48 @@ chrome.tabs.onReplaced?.addListener((addedId, removedId) => withAutoState(async 
     await persistAuto();
   }
 }).catch(() => {}));
+async function syncUpdateAlarm() {
+  if (typeof chrome.alarms?.create !== 'function') return;
+  try {
+    await chrome.alarms.create(UPDATE_CHECK_ALARM, { periodInMinutes: UPDATE_CHECK_PERIOD_MINUTES });
+  } catch { /* ignore */ }
+}
+
+async function checkRemoteUpdate({ force = false } = {}) {
+  try {
+    if (!force && typeof chrome.storage?.local?.get === 'function') {
+      const cached = (await chrome.storage.local.get(UPDATE_STATUS_KEY))?.[UPDATE_STATUS_KEY];
+      if (cached && cached.checkedAtMs && Date.now() - cached.checkedAtMs < UPDATE_CHECK_THROTTLE_MS) {
+        return cached;
+      }
+    }
+    const settings = await getSettings();
+    const base = safeLocalServiceUrl(settings.serviceUrl);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    let res;
+    try {
+      res = await fetch(`${base}/update/status?fetch=1`, { signal: ctrl.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res?.ok) return null;
+    const data = await res.json().catch(() => null);
+    if (!data?.ok) return null;
+    const entry = { ...data, checkedAtMs: Date.now() };
+    await chrome.storage?.local?.set?.({ [UPDATE_STATUS_KEY]: entry }).catch(() => {});
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
 chrome.alarms?.onAlarm?.addListener(alarm => {
   if (alarm?.name === DISCARD_ALARM) {
     return handleDiscardAlarm().catch(e => console.warn('执行自动休眠失败:', e));
+  }
+  if (alarm?.name === UPDATE_CHECK_ALARM) {
+    return checkRemoteUpdate({ force: true }).catch(() => {});
   }
   return handleAutoAlarm(alarm).catch(e => console.warn('读取自动整理队列失败:', e));
 });
@@ -4381,6 +4428,8 @@ async function dedupExistingNewTabs() {
 dedupExistingNewTabs();
 chrome.runtime.onStartup?.addListener(() => {
   syncDiscardAlarm().catch(() => {});
+  syncUpdateAlarm().catch(() => {});
+  checkRemoteUpdate({ force: false }).catch(() => {});
   dedupExistingNewTabs();
 });
 
@@ -4389,4 +4438,5 @@ chrome.runtime.onInstalled?.addListener(async () => {
   const { settings } = await chrome.storage.sync.get('settings');
   if (!settings) await chrome.storage.sync.set({ settings: DEFAULTS });
   await syncDiscardAlarm();
+  await syncUpdateAlarm();
 });

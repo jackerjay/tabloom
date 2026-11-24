@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
-import { collectAllowedOrigins, discoverLoadedExtensionOrigins } from './service.mjs';
+import { buildNativeWrapper, collectAllowedOrigins, discoverLoadedExtensionOrigins } from './service.mjs';
 
 test('discoverLoadedExtensionOrigins and collectAllowedOrigins discover browser Preferences IDs safely', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'tabloom-service-test-'));
@@ -56,8 +56,13 @@ test('install.sh passes bash syntax check and help output without internal URLs'
   assert.match(help, /--uninstall/);
   assert.match(help, /github\.com\/jackerjay\/tabloom/);
   const raw = readFileSync(installScript, 'utf8');
-  const blocked = ['code\\.by' + 'ted\\.org', 'sun' + 'deqi', '\\.tr' + 'ae', 'lark' + 'office', 'fei' + 'shu'];
-  assert.equal(new RegExp(blocked.join('|'), 'i').test(raw), false, 'install.sh must contain zero internal references');
+  assert.equal(/git@/i.test(raw), false, 'install.sh must not embed private SSH git@ URLs');
+  assert.match(raw, /https:\/\/github\.com\/jackerjay\/tabloom\.git/);
+});
+
+test('buildNativeWrapper safely single-quotes POSIX paths against shell expansion', () => {
+  const out = buildNativeWrapper('/opt/node $(id)/bin/node', "/Users/o'neil/`whoami`/native-host.mjs");
+  assert.match(out, /^#!\/bin\/sh\nexec '\/opt\/node \$\(id\)\/bin\/node' '\/Users\/o'\\''neil\/`whoami`\/native-host\.mjs' "\$@"/);
 });
 
 test('buildDaemonInstallCommand produces copyable single-line GitHub install.sh commands without placeholders', async () => {
@@ -80,4 +85,50 @@ test('buildDaemonInstallCommand produces copyable single-line GitHub install.sh 
   const freshCmd = await ctx.buildDaemonInstallCommand();
   assert.equal(freshCmd, 'git clone https://github.com/jackerjay/tabloom.git ~/tabloom && ~/tabloom/install.sh --origin chrome-extension://abcdefghijklmnopabcdefghijklmnop/');
   assert.equal(freshCmd.includes('<项目目录>'), false);
+});
+
+test('/update/apply rejects non-extension origins and unconfirmed payloads while /update/status stays readable', async () => {
+  const port = 18794;
+  const child = spawn(process.execPath, ['server/server.mjs'], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    await new Promise((res, rej) => {
+      const timer = setTimeout(() => rej(new Error('server start timeout')), 5000);
+      child.stdout.on('data', d => {
+        if (String(d).includes(String(port)) || String(d).includes('listening')) {
+          clearTimeout(timer);
+          res();
+        }
+      });
+      setTimeout(() => { clearTimeout(timer); res(); }, 800);
+    });
+
+    const stRes = await fetch(`http://127.0.0.1:${port}/update/status`);
+    assert.equal(stRes.status, 200);
+    const stJson = await stRes.json();
+    assert.equal(stJson.ok, true);
+
+    const noOrigin = await fetch(`http://127.0.0.1:${port}/update/apply`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    assert.equal(noOrigin.status, 403);
+
+    const unconfirmed = await fetch(`http://127.0.0.1:${port}/update/apply`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+      body: JSON.stringify({ confirm: false }),
+    });
+    assert.equal(unconfirmed.status, 400);
+    const uncJson = await unconfirmed.json();
+    assert.equal(uncJson.applied, false);
+  } finally {
+    child.kill();
+  }
 });

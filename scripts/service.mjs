@@ -173,9 +173,13 @@ function buildPlist() {
 `;
 }
 
-function buildNativeWrapper() {
-  const quotedNode = JSON.stringify(process.execPath);
-  const quotedScript = JSON.stringify(nativeHostScript);
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+export function buildNativeWrapper(execPath = process.execPath, scriptPath = nativeHostScript) {
+  const quotedNode = shellQuote(execPath);
+  const quotedScript = shellQuote(scriptPath);
   return `#!/bin/sh
 exec ${quotedNode} ${quotedScript} "$@"
 `;

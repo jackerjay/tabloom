@@ -1950,6 +1950,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
       copyCmdBtn: $('svcCopyCmdBtn'),
       retryBtn: $('svcRetryBtn'),
       pillEl: $('health'),
+      badgeEls: [$('openSettingsUpdateDot')],
       onServiceOnline: () => modelCtrl?.reload?.(),
     });
   }
