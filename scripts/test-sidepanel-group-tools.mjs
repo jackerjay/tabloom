@@ -148,7 +148,8 @@ test('same activation never scrolls twice or steals input focus; filtering remai
   assert.equal(firstScrollCount, 1);
   f.nodes.search.focus(); const focusCalls = f.document.focusCalls;
   f.chrome.tabs.onActivated.emit({ tabId: 2, windowId: 7 }); await f.flushRefresh();
-  assert.equal(f.groups()[0].querySelector('li[data-tab-id="2"]').scrolls.length, 0);
+  const afterRow = f.groups()[0].querySelector('li[data-tab-id="2"]');
+  assert.equal(afterRow === first ? afterRow.scrolls.length : firstScrollCount + afterRow.scrolls.length, firstScrollCount);
   assert.equal(f.document.activeElement, f.nodes.search); assert.equal(f.document.focusCalls, focusCalls);
   f.nodes.search.value = 'Alpha'; f.nodes.search.oninput();
   f.chrome.tabs.onActivated.emit({ tabId: 2, windowId: 7 }); await f.flushRefresh();

@@ -34,6 +34,10 @@ let manualTabTitles = {};
 let pendingPaintAfterRename = false;
 let pinnedFavorites = [];
 let recentVisits = {};
+let lastPaintStructSig = '';
+let lastFavStripSig = '';
+let lastDupUrlSig = '';
+let lastRunCache = undefined;
 
 function isShellTab(tab) {
   const url = tab?.url || '';
@@ -94,7 +98,7 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
   const native = isNativeGroup(group);
   const isLocked = native && lockedGroupIds.has(group.id);
   const isManualNamed = native && manualNamedGroups.has(group.id);
-  const expanded = !group?.collapsed || followExpandedGroupId === group?.id;
+  const expanded = Boolean(searchTerm) || !group?.collapsed || followExpandedGroupId === group?.id;
   box.classList.toggle('active-group', native && group.id === activeContext.groupId);
   box.classList.toggle('is-selected', native && selectedGroupIds.has(group.id));
   box.classList.toggle('is-locked', isLocked);
@@ -182,25 +186,8 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
   const ul = document.createElement('ul');
   ul.className = 'sp-tabs';
   if (!expanded) ul.style.display = 'none';
-  head.onclick = async () => {
-    const hidden = ul.style.display === 'none';
-    ul.style.display = hidden ? '' : 'none';
-    chev.classList.toggle('collapsed', !hidden);
-    head.setAttribute('aria-expanded', String(hidden));
-    if (!native) return;
-    followExpandedGroupId = null;
-    // Explicit user collapse remains native; automatic following is UI-only.
-    try { await chrome.tabGroups.update(group.id, { collapsed: !hidden }); }
-    catch { scheduleRefresh(); }
-  };
-  head.onkeydown = e => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      head.click();
-    }
-  };
 
-  for (const t of tabs) {
+  const buildTabRow = t => {
     const li = document.createElement('li');
     li.dataset.tabId = String(t.id);
     if (t.discarded) li.classList.add('is-discarded');
@@ -211,6 +198,8 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
       li.classList.add('recent');
     }
     const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.decoding = 'async';
     img.src = faviconUrl(t.url);
     img.alt = '';
     img.onerror = () => {
@@ -226,33 +215,47 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
     titleBtn.type = 'button';
     titleBtn.className = 't';
     titleBtn.textContent = displayTitle;
-    titleBtn.title = [t.title || t.url || '', ago ? `最近访问：${ago}` : '', summary ? `摘要：${summary}` : '', '双击可重命名标签'].filter(Boolean).join('\n');
+    titleBtn.title = [t.title || t.url || '', ago ? `最近访问：${ago}` : '', summary ? `摘要：${summary}` : '', '点击切换 · 右侧铅笔或双击可重命名'].filter(Boolean).join('\n');
     const activate = () => {
+      const rootList = $('list');
+      if (rootList && typeof rootList.querySelectorAll === 'function') {
+        for (const prev of rootList.querySelectorAll('li.active, li.recent')) {
+          prev.classList.remove('active', 'recent');
+          if (typeof prev.removeAttribute === 'function') prev.removeAttribute('aria-current');
+          else prev.attrs && delete prev.attrs['aria-current'];
+        }
+      }
+      li.classList.add('active');
+      li.setAttribute('aria-current', 'page');
       chrome.tabs.update(t.id, { active: true });
       chrome.windows.update(windowId, { focused: true });
+    };
+    const saveTabRename = async nextTitle => {
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'tab-rename', tabId: t.id, title: nextTitle });
+        if (!res?.ok) throw new Error(res?.message || '重命名失败');
+        manualTabTitles[t.id] = { title: res.title, url: res.url || '', at: Date.now() };
+        toast(`已重命名标签为「${res.title}」`, 'ok');
+        lastPaintStructSig = '';
+        paint();
+      } catch (err) {
+        toast(err?.message || '重命名失败', 'err');
+      }
+    };
+    const finishTabRename = () => {
+      if (pendingPaintAfterRename) {
+        pendingPaintAfterRename = false;
+        paint();
+      }
     };
     if (typeof bindTabTitleDoubleClick === 'function') {
       bindTabTitleDoubleClick({
         titleBtn,
         currentTitle: displayTitle,
+        instantClick: true,
         onActivate: activate,
-        onSave: async nextTitle => {
-          try {
-            const res = await chrome.runtime.sendMessage({ type: 'tab-rename', tabId: t.id, title: nextTitle });
-            if (!res?.ok) throw new Error(res?.message || '重命名失败');
-            manualTabTitles[t.id] = { title: res.title, url: res.url || '', at: Date.now() };
-            toast(`已重命名标签为「${res.title}」`, 'ok');
-            paint();
-          } catch (err) {
-            toast(err?.message || '重命名失败', 'err');
-          }
-        },
-        onFinish: () => {
-          if (pendingPaintAfterRename) {
-            pendingPaintAfterRename = false;
-            paint();
-          }
-        },
+        onSave: saveTabRename,
+        onFinish: finishTabRename,
       });
     } else {
       titleBtn.onclick = e => { e.stopPropagation(); activate(); };
@@ -288,8 +291,31 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
     }
     const favKey = typeof favoriteKeyOf === 'function' ? favoriteKeyOf(t.url) : '';
     const isFav = /^https?:\/\//i.test(t.url || '') && pinnedFavorites.some(f => (f.key || favoriteKeyOf(f.url)) === favKey);
+    if (isFav) li.classList.add('has-fav-row');
     const ops = document.createElement('span');
     ops.className = 'sp-row-ops' + (isFav ? ' has-fav' : '');
+    if (typeof startInlineRename === 'function') {
+      const renameTabBtn = document.createElement('button');
+      renameTabBtn.type = 'button';
+      renameTabBtn.className = 'tab-rename-btn';
+      renameTabBtn.innerHTML = icon('edit', 11);
+      renameTabBtn.title = '重命名标签';
+      renameTabBtn.setAttribute('aria-label', `重命名标签 ${displayTitle}`);
+      renameTabBtn.onclick = e => {
+        e.stopPropagation();
+        startInlineRename({
+          textEl: titleBtn,
+          currentTitle: displayTitle,
+          inputClass: 'tname-input',
+          maxLength: 80,
+          ariaLabel: '输入标签名称',
+          placeholder: '输入标签名称…',
+          onSave: saveTabRename,
+          onFinish: finishTabRename,
+        });
+      };
+      ops.append(renameTabBtn);
+    }
     if (/^https?:\/\//i.test(t.url || '')) {
       const favBtn = document.createElement('button');
       favBtn.type = 'button';
@@ -304,14 +330,47 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
         if (!res?.ok) return toast(res?.message || '操作失败', 'err');
         pinnedFavorites = Array.isArray(res.favorites) ? res.favorites : pinnedFavorites;
         toast(res.pinned ? '已加入置顶收藏' : '已取消置顶收藏', res.pinned ? 'ok' : 'info');
+        lastPaintStructSig = '';
         paint();
       };
       ops.append(favBtn);
     }
     ops.append(close);
     li.append(ops);
-    ul.appendChild(li);
-  }
+    return li;
+  };
+
+  let populated = false;
+  const populateTabs = () => {
+    if (populated) return;
+    populated = true;
+    ul.dataset.populated = '1';
+    const frag = typeof document.createDocumentFragment === 'function' ? document.createDocumentFragment() : null;
+    for (const t of tabs) (frag || ul).appendChild(buildTabRow(t));
+    if (frag) ul.appendChild(frag);
+  };
+  ul._populateTabs = populateTabs;
+  if (expanded) populateTabs();
+  else ul.dataset.populated = '0';
+
+  head.onclick = async () => {
+    const hidden = ul.style.display === 'none';
+    if (hidden) populateTabs();
+    ul.style.display = hidden ? '' : 'none';
+    chev.classList.toggle('collapsed', !hidden);
+    head.setAttribute('aria-expanded', String(hidden));
+    if (!native) return;
+    followExpandedGroupId = null;
+    // Explicit user collapse remains native; automatic following is UI-only.
+    try { await chrome.tabGroups.update(group.id, { collapsed: !hidden }); }
+    catch { scheduleRefresh(); }
+  };
+  head.onkeydown = e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      head.click();
+    }
+  };
   top.append(head);
   if (native) {
     const actions = document.createElement('div');
@@ -491,21 +550,26 @@ function paint() {
     for (const t of tabs || []) {
       if (/^https?:\/\//i.test(t.url || '')) openTabKeys.add(favoriteKeyOf(t.url));
     }
-    renderFavoritesStrip($('spFavoritesBar'), pinnedFavorites, openTabKeys, {
-      onOpen: async fav => {
-        const res = await chrome.runtime.sendMessage({ type: 'favorite-open', url: fav.url, key: fav.key, windowId });
-        if (!res?.ok) return toast(res?.message || '切换失败', 'err');
-        toast(res.action === 'switched' ? `已切换到：${fav.title || fav.url}` : `已打开收藏：${fav.title || fav.url}`, 'ok');
-      },
-      onRemove: async fav => {
-        const res = await chrome.runtime.sendMessage({ type: 'favorite-toggle', url: fav.url, pinned: false });
-        if (res?.ok) {
-          pinnedFavorites = Array.isArray(res.favorites) ? res.favorites : [];
-          toast('已取消置顶收藏', 'info');
-          paint();
-        }
-      },
-    });
+    const favSig = `${pinnedFavorites.map(f => `${f.key || f.url}:${f.title || ''}`).join('|')}#${[...openTabKeys].sort().join('|')}`;
+    if (favSig !== lastFavStripSig) {
+      lastFavStripSig = favSig;
+      renderFavoritesStrip($('spFavoritesBar'), pinnedFavorites, openTabKeys, {
+        onOpen: async fav => {
+          const res = await chrome.runtime.sendMessage({ type: 'favorite-open', url: fav.url, key: fav.key, windowId });
+          if (!res?.ok) return toast(res?.message || '切换失败', 'err');
+          toast(res.action === 'switched' ? `已切换到：${fav.title || fav.url}` : `已打开收藏：${fav.title || fav.url}`, 'ok');
+        },
+        onRemove: async fav => {
+          const res = await chrome.runtime.sendMessage({ type: 'favorite-toggle', url: fav.url, pinned: false });
+          if (res?.ok) {
+            pinnedFavorites = Array.isArray(res.favorites) ? res.favorites : [];
+            toast('已取消置顶收藏', 'info');
+            lastFavStripSig = '';
+            paint();
+          }
+        },
+      });
+    }
   }
   const activeId = activeContext.tabId;
   const followChanged = activeId !== lastFollowTabId;
@@ -536,28 +600,85 @@ function paint() {
     }
   }
   const list = $('list');
-  list.innerHTML = '';
-  let idx = 0, shown = 0;
   // Promote only in the view: never mutate the native array or move Chrome groups/tabs.
   const orderedGroups = [...groups].filter(isNativeGroup).sort((a, b) =>
     Number(b.id === activeContext.groupId) - Number(a.id === activeContext.groupId));
+
+  const groupRenderList = [];
+  let shown = 0;
   for (const g of orderedGroups) {
     const filtered = (buckets.get(g.id) || []).filter(matches);
     if (!filtered.length) continue;
-    list.appendChild(renderGroup(g.title, g.color, filtered, g, idx++, activeId));
+    groupRenderList.push({ g, filtered });
     shown += filtered.length;
   }
   const filteredUngrouped = ungrouped.filter(matches);
   if (filteredUngrouped.length) {
-    list.appendChild(renderGroup('未分组', 'grey', filteredUngrouped, null, idx++, activeId));
+    groupRenderList.push({ g: null, filtered: filteredUngrouped });
     shown += filteredUngrouped.length;
   }
-  if (!shown) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = searchTerm ? '没有匹配的标签' : '当前窗口没有标签';
-    list.appendChild(empty);
+
+  const favKeySet = new Set(pinnedFavorites.map(f => f.key || (typeof favoriteKeyOf === 'function' ? favoriteKeyOf(f.url) : '')));
+  const structParts = [
+    searchTerm,
+    activeContext.mode === 'recent' ? String(activeId) : 'a',
+    groupRenderList.map(({ g, filtered }) => {
+      const gid = g ? g.id : 'u';
+      const exp = !g ? 1 : Number(Boolean(searchTerm) || !g.collapsed || followExpandedGroupId === g.id);
+      const lockedFlag = g && lockedGroupIds.has(g.id) ? 1 : 0;
+      const selFlag = g && selectedGroupIds.has(g.id) ? 1 : 0;
+      const gTitle = g ? (manualNamedGroups.get(g.id) || g.title || '') : '未分组';
+      const tabsSig = filtered.map(t => {
+        const dt = typeof resolveTabDisplayTitle === 'function' ? resolveTabDisplayTitle(t, tabMeta, manualTabTitles) : t.title;
+        const fk = typeof favoriteKeyOf === 'function' ? favoriteKeyOf(t.url) : '';
+        return `${t.id}:${t.discarded ? 1 : 0}:${favKeySet.has(fk) ? 1 : 0}:${dt}`;
+      }).join(',');
+      return `${gid}|${gTitle}|${g?.color || ''}|${exp}|${lockedFlag}|${selFlag}|[${tabsSig}]`;
+    }).join(';;'),
+  ];
+  const structSig = structParts.join('##');
+
+  if (structSig === lastPaintStructSig && list.children.length > 0 && shown > 0) {
+    for (const grp of list.children) {
+      if (!grp.classList?.contains?.('sp-group')) continue;
+      const gId = grp.dataset?.groupId;
+      const isActGrp = gId && gId !== 'u' && Number(gId) === activeContext.groupId;
+      grp.classList.toggle('active-group', Boolean(isActGrp));
+      const ulEl = grp.querySelector?.('.sp-tabs');
+      if (ulEl) {
+        for (const li of ulEl.children) {
+          const lid = Number(li.dataset?.tabId);
+          const isAct = lid === activeId && activeContext.mode === 'active';
+          const isRec = lid === activeId && activeContext.mode === 'recent';
+          li.classList.toggle('active', isAct);
+          li.classList.toggle('recent', isRec);
+          if (isAct) li.setAttribute('aria-current', 'page');
+          else if (typeof li.removeAttribute === 'function') li.removeAttribute('aria-current');
+          else if (li.attrs) delete li.attrs['aria-current'];
+        }
+      }
+    }
+  } else {
+    lastPaintStructSig = structSig;
+    list.innerHTML = '';
+    if (!shown) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = searchTerm ? '没有匹配的标签' : '当前窗口没有标签';
+      list.appendChild(empty);
+    } else {
+      const frag = typeof document.createDocumentFragment === 'function' ? document.createDocumentFragment() : null;
+      let idx = 0;
+      for (const { g, filtered } of groupRenderList) {
+        const node = g
+          ? renderGroup(g.title, g.color, filtered, g, idx++, activeId)
+          : renderGroup('未分组', 'grey', filtered, null, idx++, activeId);
+        (frag || list).appendChild(node);
+      }
+      if (frag) list.appendChild(frag);
+    }
   }
+
   $('sp-status').textContent =
     `${tabs.length} 个标签、${groups.length} 个分组${searchTerm ? `、匹配 ${shown}` : ''}`;
   updateLastRun();
@@ -575,12 +696,23 @@ function paint() {
   }
 }
 
-async function updateLastRun() {
-  const { lastRun } = await chrome.storage.session.get('lastRun');
-  if (lastRun?.applied) {
-    const time = new Date(lastRun.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-    $('sp-status').textContent += `、上次整理 ${time}（${lastRun.source === 'ai' ? 'AI' : '规则'}）`;
+function renderLastRunSuffix(lastRun) {
+  if (!lastRun?.applied) return;
+  const time = new Date(lastRun.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  const suffix = `、上次整理 ${time}（${lastRun.source === 'ai' ? 'AI' : '规则'}）`;
+  if (!$('sp-status').textContent.endsWith(suffix)) {
+    $('sp-status').textContent += suffix;
   }
+}
+
+async function updateLastRun() {
+  if (lastRunCache !== undefined) {
+    renderLastRunSuffix(lastRunCache);
+    return;
+  }
+  const { lastRun } = await chrome.storage.session.get('lastRun');
+  lastRunCache = lastRun || null;
+  renderLastRunSuffix(lastRunCache);
 }
 
 async function refresh() {
@@ -632,7 +764,11 @@ async function refresh() {
     activeContext = displayContext(context, ownTabs, actualId);
     lastData = { tabs: ownTabs, groups: groups.filter(group => isNativeGroup(group) && group.windowId === hostWindowId), activeId: actualId };
     paint();
-    updateDupUI();
+    const urlSig = ownTabs.map(t => `${t.id}:${t.url || ''}`).join('|');
+    if (urlSig !== lastDupUrlSig) {
+      lastDupUrlSig = urlSig;
+      updateDupUI();
+    }
   } catch (error) {
     if (revision === refreshRevision) toast(`读取标签失败：${error.message}，请重试`, 'err');
   }
@@ -1000,9 +1136,7 @@ $('search').oninput = () => {
 
 $('collapseAll').onclick = async () => {
   followExpandedGroupId = null;
-  for (const g of lastData.groups) {
-    try { await chrome.tabGroups.update(g.id, { collapsed: true }); } catch { /* 组可能已消失 */ }
-  }
+  await Promise.all(lastData.groups.map(g => chrome.tabGroups.update(g.id, { collapsed: true }).catch(() => {})));
   refresh();
 };
 
@@ -1011,9 +1145,7 @@ if ($('locateActiveHeadBtn')) $('locateActiveHeadBtn').onclick = () => locateCur
 
 $('expandAll').onclick = async () => {
   followExpandedGroupId = null;
-  for (const g of lastData.groups) {
-    try { await chrome.tabGroups.update(g.id, { collapsed: false }); } catch { /* 组可能已消失 */ }
-  }
+  await Promise.all(lastData.groups.map(g => chrome.tabGroups.update(g.id, { collapsed: false }).catch(() => {})));
   refresh();
 };
 
@@ -1240,6 +1372,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     updateDupUI();
   }
   if (area === 'session' && changes.lastRun) {
+    lastRunCache = changes.lastRun.newValue || null;
     const summary = analysisSummary(changes.lastRun.newValue);
     if (summary) $('analysisMeta').textContent = `最近一次：${summary}`;
     refreshCleanupAdvice();

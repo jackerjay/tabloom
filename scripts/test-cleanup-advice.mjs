@@ -23,7 +23,7 @@ test('cached successful organize includes advice in result and lastRun without c
   const f = fixture([tab(1, { lastAccessed: 1 })]); f.stores.session.undo = { keep: true };
   f.hooks.fetchResult = { source: 'ai', groups: [{ name: 'Research', color: 'purple', tabIds: [1] }], cache: { hits: 1, misses: 0, hitTabIds: [1] } };
   const r = await f.send({ type: 'organize', windowId: 1, apply: true }); assert.equal(r.ok, true); assert.equal(r.empty, true); assert.equal(r.cleanup.eligibleCount, 1); assert.equal(f.stores.session.lastRun.cleanup.basis, 'lastAccessed'); assert.deepEqual(f.stores.session.undo, { keep: true });
-  const payload = JSON.parse(f.calls.fetch[0].body); assert.equal(payload.cleanup, undefined); assert.equal(payload.tabs[0].lastAccessed, undefined); assert.deepEqual(Object.keys(payload).sort(), ['context', 'existingGroups', 'language', 'mode', 'tabs']);
+  const payload = JSON.parse(f.calls.fetch[0].body); assert.equal(payload.cleanup, undefined); assert.equal(payload.tabs[0].lastAccessed, undefined); assert.deepEqual(Object.keys(payload).filter(k => !k.startsWith('_snapshot') && k !== 'windowId').sort(), ['context', 'existingGroups', 'language', 'mode', 'tabs']);
 });
 test('bounded oldest-first advice and empty organize share original target window without model calls', async () => {
   const f = fixture([]); for (let i = 1; i <= 70; i++) f.tabs.set(i, tab(i, { lastAccessed: f.now() - (8 + i) * DAY }));

@@ -850,7 +850,7 @@ async function organize({ apply = false, incremental = false, windowId = null, a
   await autoReady;
   const [all, existing, locked, manualNamed] = await Promise.all([
     chrome.tabs.query({ windowId }),
-    chrome.tabGroups.query({ windowId }),
+    typeof chrome.tabGroups?.query === 'function' ? chrome.tabGroups.query({ windowId }) : Promise.resolve([]),
     readLockedGroupIds(),
     readManualNamedGroups(),
   ]);

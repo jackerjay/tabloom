@@ -478,11 +478,15 @@ function startInlineGroupRename({ nameEl, currentTitle = '', onSave, onFinish } 
   });
 }
 
-function bindTabTitleDoubleClick({ titleBtn, currentTitle = '', onActivate, onSave, onFinish } = {}) {
+function bindTabTitleDoubleClick({ titleBtn, currentTitle = '', instantClick = false, onActivate, onSave, onFinish } = {}) {
   if (!titleBtn) return;
   let clickTimer = null;
   titleBtn.onclick = e => {
     e.stopPropagation();
+    if (instantClick) {
+      onActivate?.();
+      return;
+    }
     if (e?.detail >= 2) {
       if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
       return;

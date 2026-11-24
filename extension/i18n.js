@@ -138,6 +138,8 @@
     ['输入分组名称…', 'Enter group name…'],
     ['输入标签名称', 'Enter tab name'],
     ['输入标签名称…', 'Enter tab name…'],
+    ['重命名标签', 'Rename tab'],
+    ['点击切换 · 右侧铅笔或双击可重命名', 'Click to switch · Pencil or double-click to rename'],
     ['双击可重命名标签', 'Double-click to rename tab'],
     ['已固定', 'Pinned'],
     ['重命名分组并固定名称', 'Rename & pin group name'],

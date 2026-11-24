@@ -4,9 +4,38 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
+import {
+  auditGroupAggregation,
+  buildBatchPrefixClusters,
+  clusterTabsByContentTheme,
+  consolidateAndAuditGroups,
+  distillGroupProfiles,
+  extractSystemTokens,
+  extractUrlProfile,
+  inferTabContentTopic,
+  isGenericDomainGroupName,
+  normalizeAggregationRules,
+  resolveTabAggregationIdentity,
+  suggestLabelForTabs,
+} from '../server/tab-intelligence.mjs';
+
 const serverSource = readFileSync(new URL('../server/server.mjs', import.meta.url), 'utf8');
 const backgroundSource = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8');
-const server = vm.createContext({ URL });
+const server = vm.createContext({
+  URL,
+  auditGroupAggregation,
+  buildBatchPrefixClusters,
+  clusterTabsByContentTheme,
+  consolidateAndAuditGroups,
+  distillGroupProfiles,
+  extractSystemTokens,
+  extractUrlProfile,
+  inferTabContentTopic,
+  isGenericDomainGroupName,
+  normalizeAggregationRules,
+  resolveTabAggregationIdentity,
+  suggestLabelForTabs,
+});
 vm.runInContext(
   serverSource.slice(serverSource.indexOf('const COLORS ='), serverSource.indexOf('/* ---------------- ACP'))
   + serverSource.slice(serverSource.indexOf('function normUrl('), serverSource.indexOf('/* ---------------- 业务入口'))

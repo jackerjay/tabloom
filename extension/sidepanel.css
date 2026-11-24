@@ -13,6 +13,8 @@ body.sidepanel {
   overflow-x: clip !important;
 }
 .sidepanel {
+  position: relative;
+  isolation: isolate;
   width: 100%;
   max-width: 100%;
   height: auto;
@@ -20,11 +22,18 @@ body.sidepanel {
   overflow-y: visible;
   box-sizing: border-box;
   background-color: var(--bg);
-  background-image: var(--ambient);
-  background-attachment: fixed;
   color: var(--text);
   display: flex;
   flex-direction: column;
+}
+.sidepanel::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-color: var(--bg);
+  background-image: var(--ambient);
 }
 .sidepanel #palette {
   z-index: 100;
@@ -46,9 +55,7 @@ body.sidepanel {
   align-items: center;
   gap: 9px;
   padding: 11px 16px;
-  background: color-mix(in oklab, var(--bg) 88%, transparent);
-  -webkit-backdrop-filter: blur(18px);
-  backdrop-filter: blur(18px);
+  background: color-mix(in oklab, var(--bg) 96%, transparent);
   border-bottom: 1px solid var(--border);
   margin: 0;
 }
@@ -737,12 +744,20 @@ select.sel.sm {
   background: var(--glass-bg);
   min-width: 0;
   max-width: 100%;
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 120px;
 }
 .sp-tabs li {
+  position: relative;
   min-width: 0;
   max-width: 100%;
   scroll-margin-top: 72px;
   scroll-margin-bottom: 18px;
+  transition: none;
+}
+.sp-tabs li.has-fav-row {
+  padding-right: 34px;
 }
 .sp-tabs li.sp-locate-flash {
   animation: locateTabFlash 1.15s var(--ease-out);
@@ -784,18 +799,34 @@ select.sel.sm {
 .sp-context-label { flex: none; font-size: 11px; color: var(--blue-deep); }
 .sp-visit-age { flex: none; font-size: 10.5px; color: var(--text-3); white-space: nowrap; }
 .sp-row-ops {
-  flex: none;
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
   gap: 2px;
-}
-.sp-tabs li:not(:hover):not(:focus-within) .sp-row-ops:not(.has-fav) {
-  width: 0;
-  margin-left: calc(var(--space-xs, 8px) * -1);
-  overflow: hidden;
+  padding: 2px 2px 2px 10px;
+  border-radius: 7px;
+  opacity: 0;
   pointer-events: none;
 }
-.sp-tabs li .tab-fav {
+.sp-tabs li:hover .sp-row-ops,
+.sp-tabs li:focus-within .sp-row-ops {
+  opacity: 1;
+  pointer-events: auto;
+  background: linear-gradient(90deg, transparent, var(--hover) 22%, var(--hover));
+}
+.sp-tabs li.active:hover .sp-row-ops,
+.sp-tabs li.active:focus-within .sp-row-ops {
+  background: linear-gradient(90deg, transparent, var(--blue-soft) 22%, var(--blue-soft));
+}
+.sp-tabs li .sp-row-ops.has-fav {
+  opacity: 1;
+  pointer-events: auto;
+}
+.sp-tabs li .tab-fav,
+.sp-tabs li .tab-rename-btn {
   flex: none;
   width: 22px;
   height: 22px;
@@ -808,23 +839,24 @@ select.sel.sm {
   display: inline-grid;
   place-items: center;
   box-shadow: none;
-  opacity: 0;
+}
+.sp-tabs li .sp-row-ops .close {
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  opacity: 0.9;
 }
 .sp-tabs li:not(:hover):not(:focus-within) .tab-fav:not(.is-fav),
-.sp-tabs li:not(:hover):not(:focus-within) .close {
-  width: 0;
-  min-width: 0;
-  padding: 0;
-  margin: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
+.sp-tabs li:not(:hover):not(:focus-within) .tab-rename-btn,
+.sp-tabs li:not(:hover):not(:focus-within) .sp-row-ops .close {
+  display: none;
 }
-.sp-tabs li:hover .tab-fav,
-.sp-tabs li:focus-within .tab-fav,
-.sp-tabs li .tab-fav.is-fav { opacity: 0.9; width: 22px; pointer-events: auto; }
 .sp-tabs li .tab-fav.is-fav { color: #f59e0b; opacity: 1; }
-.sp-tabs li .tab-fav:hover { opacity: 1; background: var(--hover); color: #f59e0b; }
+.sp-tabs li .tab-fav:hover { opacity: 1; background: var(--panel); color: #f59e0b; }
+.sp-tabs li .tab-rename-btn:hover { opacity: 1; background: var(--panel); color: var(--text); }
 .sp-fav-bar {
   margin-top: 8px;
   padding: 6px 8px;
