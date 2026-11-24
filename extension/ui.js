@@ -90,7 +90,7 @@ function paintAutoDiscard(select, value, { allowCustom = true } = {}) {
   });
 }
 function analysisSummary(result) {
-  const titles = result?.titleStats, cache = result?.cache, parts = [];
+  const titles = result?.titleStats, cache = result?.cache, audit = result?.aggregationAudit, parts = [];
   const count = value => Math.max(0, Number(value) || 0);
   if (titles) {
     parts.push(`更新 ${count(titles.updated)} 个标签标题`);
@@ -100,6 +100,10 @@ function analysisSummary(result) {
   if (cache) {
     parts.push(`复用 ${count(cache.hits)} 页缓存`);
     if (count(cache.misses)) parts.push(`${count(cache.misses)} 页未命中缓存`);
+  }
+  if (audit?.checked) {
+    if (count(audit.consolidatedCount) > 0) parts.push(`聚合检查合并 ${count(audit.consolidatedCount)} 处拆分组`);
+    else if (count(audit.issueCountAfter) > 0) parts.push(`聚合检查提示 ${count(audit.issueCountAfter)} 处可合并`);
   }
   return parts.join('，');
 }
@@ -378,6 +382,8 @@ const ICON_PATHS = {
   unlock: '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+  starFilled: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" fill="currentColor"/>',
 };
 function icon(name, size = 14, cls = '') {
   return `<svg class="${cls}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name] || ''}</svg>`;
@@ -404,28 +410,38 @@ function closeActiveGroupCloseMenu() {
   anchorEl?.setAttribute?.('aria-expanded', 'false');
 }
 
-function startInlineGroupRename({ nameEl, currentTitle = '', onSave } = {}) {
-  if (!nameEl || !nameEl.parentElement) return;
-  const parent = nameEl.parentElement;
-  if (parent.querySelector('.gname-input')) return;
+function startInlineRename({
+  textEl,
+  currentTitle = '',
+  inputClass = 'gname-input',
+  maxLength = 60,
+  ariaLabel = '输入名称',
+  placeholder = '输入名称…',
+  onSave,
+  onFinish,
+} = {}) {
+  if (!textEl || !textEl.parentElement) return;
+  const parent = textEl.parentElement;
+  if (parent.querySelector(`.${inputClass}`)) return;
   const input = document.createElement('input');
   input.type = 'text';
-  input.className = 'gname-input';
-  input.maxLength = 60;
+  input.className = inputClass;
+  input.maxLength = maxLength;
   input.value = String(currentTitle || '');
   const tr = s => (typeof translateUiText === 'function' ? translateUiText(s) : s);
-  input.setAttribute('aria-label', tr('输入分组名称'));
-  input.placeholder = tr('输入分组名称…');
+  input.setAttribute('aria-label', tr(ariaLabel));
+  input.placeholder = tr(placeholder);
 
   let settled = false;
   const finish = async commit => {
     if (settled) return;
     settled = true;
     const next = input.value.trim();
-    nameEl.hidden = false;
+    textEl.hidden = false;
     input.remove();
-    if (!commit || !next || next === String(currentTitle || '').trim()) return;
-    await onSave?.(next);
+    const changed = Boolean(commit && next && next !== String(currentTitle || '').trim());
+    if (changed) await onSave?.(next);
+    onFinish?.({ committed: changed, next });
   };
 
   for (const ev of ['click', 'dblclick', 'mousedown', 'pointerdown']) {
@@ -443,10 +459,55 @@ function startInlineGroupRename({ nameEl, currentTitle = '', onSave } = {}) {
   });
   input.addEventListener('blur', () => { finish(true); });
 
-  nameEl.hidden = true;
-  nameEl.insertAdjacentElement('afterend', input);
+  textEl.hidden = true;
+  textEl.insertAdjacentElement('afterend', input);
   input.focus();
   input.select();
+}
+
+function startInlineGroupRename({ nameEl, currentTitle = '', onSave, onFinish } = {}) {
+  return startInlineRename({
+    textEl: nameEl,
+    currentTitle,
+    inputClass: 'gname-input',
+    maxLength: 60,
+    ariaLabel: '输入分组名称',
+    placeholder: '输入分组名称…',
+    onSave,
+    onFinish,
+  });
+}
+
+function bindTabTitleDoubleClick({ titleBtn, currentTitle = '', onActivate, onSave, onFinish } = {}) {
+  if (!titleBtn) return;
+  let clickTimer = null;
+  titleBtn.onclick = e => {
+    e.stopPropagation();
+    if (e?.detail >= 2) {
+      if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+      return;
+    }
+    if (clickTimer) clearTimeout(clickTimer);
+    clickTimer = setTimeout(() => {
+      clickTimer = null;
+      onActivate?.();
+    }, 210);
+  };
+  titleBtn.ondblclick = e => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+    startInlineRename({
+      textEl: titleBtn,
+      currentTitle,
+      inputClass: 'tname-input',
+      maxLength: 80,
+      ariaLabel: '输入标签名称',
+      placeholder: '输入标签名称…',
+      onSave,
+      onFinish,
+    });
+  };
 }
 
 function openGroupCloseMenu({
@@ -1118,6 +1179,545 @@ function domainOf(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
+function formatWhitelistLabel(rule) {
+  const s = String(rule || '').trim();
+  if (!s) return '';
+  if (/^\/.+\/[gimsuy]*$/.test(s) || /^regex:/i.test(s) || s.includes('*')) {
+    return /^https?:\/\//i.test(s) ? s.replace(/^https?:\/\//i, '') : s;
+  }
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      const u = new URL(s);
+      if ((!u.pathname || u.pathname === '/') && !u.search) return u.hostname.replace(/^www\./, '');
+      return `${u.host.replace(/^www\./, '')}${u.pathname}${u.search}`;
+    } catch { /* fall through */ }
+  }
+  return domainOf(s) || s;
+}
+
+function renderWhitelistTestResult(container, res, { onSelectTab } = {}) {
+  if (!container) return;
+  container.innerHTML = '';
+  if (!res) {
+    container.classList.add('hidden');
+    return;
+  }
+  container.classList.remove('hidden');
+
+  const head = document.createElement('div');
+  head.className = 'wl-test-head';
+  const summary = document.createElement('span');
+  summary.className = 'wl-test-summary';
+  if (!res.ok) {
+    summary.classList.add('is-err');
+    summary.textContent = res.message || '规则测试失败';
+  } else if (res.mode === 'single') {
+    const label = formatWhitelistLabel(res.rule) || res.rule;
+    summary.textContent = `检查 ${res.totalTabs} 个已打开页面，命中 ${res.matchedCount} 个（${label}）`;
+  } else {
+    summary.textContent = `检查 ${res.totalTabs} 个已打开页面，命中 ${res.matchedCount} 个（${res.ruleCount} 条规则）`;
+  }
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'wl-test-close';
+  closeBtn.textContent = '×';
+  closeBtn.title = '收起测试结果';
+  closeBtn.setAttribute('aria-label', '收起测试结果');
+  closeBtn.onclick = () => {
+    container.innerHTML = '';
+    container.classList.add('hidden');
+  };
+  head.append(summary, closeBtn);
+  container.appendChild(head);
+
+  if (!res.ok) return;
+  const matches = Array.isArray(res.matches) ? res.matches : [];
+  if (!matches.length) {
+    const empty = document.createElement('div');
+    empty.className = 'wl-test-empty';
+    empty.textContent = '当前已打开页面中暂无命中项';
+    container.appendChild(empty);
+    return;
+  }
+
+  const list = document.createElement('div');
+  list.className = 'wl-test-list';
+  for (const item of matches.slice(0, 20)) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'wl-test-item';
+    row.title = item.url;
+    const title = document.createElement('span');
+    title.className = 'wl-test-title';
+    title.textContent = item.title || item.url;
+    const url = document.createElement('span');
+    url.className = 'wl-test-url';
+    const matchedHint = res.mode === 'all' && Array.isArray(item.matchedRules) && item.matchedRules.length
+      ? `[${item.matchedRules.map(formatWhitelistLabel).join(', ')}] `
+      : '';
+    url.textContent = `${matchedHint}${item.url}`;
+    row.append(title, url);
+    row.onclick = () => onSelectTab?.(item);
+    list.appendChild(row);
+  }
+  if (matches.length > 20) {
+    const more = document.createElement('div');
+    more.className = 'wl-test-empty';
+    more.textContent = `仅展示前 20 项，共命中 ${matches.length} 个页面`;
+    list.appendChild(more);
+  }
+  container.appendChild(list);
+}
+
+function buildSuggestionShell(container, res, { emptyText, summaryText, onApplyAll } = {}) {
+  if (!container) return null;
+  container.innerHTML = '';
+  if (!res) {
+    container.classList.add('hidden');
+    return null;
+  }
+  container.classList.remove('hidden');
+
+  const head = document.createElement('div');
+  head.className = 'wl-test-head';
+  const summary = document.createElement('span');
+  summary.className = 'wl-test-summary';
+  const suggestions = Array.isArray(res.suggestions) ? res.suggestions : [];
+  if (!res.ok) {
+    summary.classList.add('is-err');
+    summary.textContent = res.message || '获取建议失败';
+  } else {
+    const srcLabel = res.source === 'ai' ? 'AI Agent' : '内容分析';
+    summary.textContent = suggestions.length
+      ? `${srcLabel} ${summaryText(suggestions.length)}`
+      : `${srcLabel}：${emptyText}`;
+  }
+  const headActions = document.createElement('span');
+  headActions.className = 'wl-head-actions';
+  if (res.ok && suggestions.length && typeof onApplyAll === 'function') {
+    const applyAllBtn = document.createElement('button');
+    applyAllBtn.type = 'button';
+    applyAllBtn.className = 'mini-btn primary wl-apply-all-btn';
+    applyAllBtn.textContent = suggestions.length > 1 ? `一键采纳 (${suggestions.length})` : '一键采纳';
+    applyAllBtn.title = '一键全部应用或叠加更新当前列出的规则建议';
+    applyAllBtn.onclick = async () => {
+      applyAllBtn.disabled = true;
+      try {
+        const appliedRes = await onApplyAll(suggestions);
+        if (appliedRes?.ok !== false) {
+          container.innerHTML = '';
+          container.classList.add('hidden');
+        }
+      } finally {
+        applyAllBtn.disabled = false;
+      }
+    };
+    headActions.appendChild(applyAllBtn);
+  }
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'wl-test-close';
+  closeBtn.textContent = '×';
+  closeBtn.title = '收起建议';
+  closeBtn.onclick = () => {
+    container.innerHTML = '';
+    container.classList.add('hidden');
+  };
+  headActions.appendChild(closeBtn);
+  head.append(summary, headActions);
+  container.appendChild(head);
+  if (!res.ok || !suggestions.length) return null;
+
+  const list = document.createElement('div');
+  list.className = 'wl-test-list';
+  container.appendChild(list);
+  return { list, suggestions };
+}
+
+function appendSuggestionCard(list, { badgeClass, badgeText, countText, ruleText, ruleTitle, reasonText, previewLabel, applyLabel, extraNode = null, onPreview, onApply, container }) {
+  const card = document.createElement('div');
+  card.className = 'wl-suggest-card';
+
+  const top = document.createElement('div');
+  top.className = 'wl-suggest-top';
+  const badge = document.createElement('span');
+  badge.className = `wl-suggest-badge ${badgeClass}`;
+  badge.textContent = badgeText;
+  const countSpan = document.createElement('span');
+  countSpan.className = 'wl-suggest-count';
+  countSpan.textContent = countText;
+  top.append(badge, countSpan);
+
+  const ruleCode = document.createElement('div');
+  ruleCode.className = 'wl-suggest-rule';
+  ruleCode.textContent = ruleText;
+  ruleCode.title = ruleTitle || ruleText;
+
+  const reason = document.createElement('div');
+  reason.className = 'wl-suggest-reason';
+  reason.textContent = reasonText || '';
+
+  const actions = document.createElement('div');
+  actions.className = 'wl-suggest-actions';
+  const previewBtn = document.createElement('button');
+  previewBtn.type = 'button';
+  previewBtn.className = 'mini-btn';
+  previewBtn.textContent = previewLabel || '预览命中';
+  previewBtn.onclick = () => onPreview?.();
+  const applyBtn = document.createElement('button');
+  applyBtn.type = 'button';
+  applyBtn.className = 'mini-btn primary';
+  applyBtn.textContent = applyLabel;
+  applyBtn.onclick = async () => {
+    applyBtn.disabled = true;
+    try {
+      const res = await onApply?.();
+      if (res?.ok !== false) {
+        card.remove();
+        if (!list.children.length) {
+          container.innerHTML = '';
+          container.classList.add('hidden');
+        }
+      }
+    } finally {
+      applyBtn.disabled = false;
+    }
+  };
+  actions.append(previewBtn, applyBtn);
+
+  card.append(top, ruleCode);
+  if (extraNode) card.appendChild(extraNode);
+  card.append(reason, actions);
+  list.appendChild(card);
+}
+
+function renderWhitelistSuggestions(container, res, { onApply, onApplyAll, onPreview } = {}) {
+  const shell = buildSuggestionShell(container, res, {
+    summaryText: n => `生成 ${n} 条防重白名单建议`,
+    emptyText: '当前暂无需要额外放行多开或收敛的路径',
+    onApplyAll,
+  });
+  if (!shell) return;
+  for (const item of shell.suggestions) {
+    const diffLabel = Array.isArray(item.changes) && item.changes.length ? item.changes.join(' · ') : '';
+    appendSuggestionCard(shell.list, {
+      container,
+      badgeClass: item.kind === 'refine' ? 'is-refine' : 'is-add',
+      badgeText: item.kind === 'refine'
+        ? (diffLabel ? `叠加优化 · ${diffLabel}` : (item.replaces ? `收敛替换 ${formatWhitelistLabel(item.replaces)}` : '叠加优化规则'))
+        : '建议放行多开',
+      countText: `命中 ${item.matchedCount || 0} 页`,
+      ruleText: item.rule,
+      ruleTitle: item.rule,
+      reasonText: item.reason,
+      previewLabel: '预览命中',
+      applyLabel: item.kind === 'refine' ? '替换采纳' : '+ 采纳',
+      onPreview: () => onPreview?.(item),
+      onApply: () => onApply?.(item),
+    });
+  }
+}
+
+function formatAggregationRuleLabel(rule) {
+  if (!rule) return '';
+  if (typeof rule === 'string') return formatWhitelistLabel(rule);
+  const pat = formatWhitelistLabel(rule.pattern || '');
+  const depth = rule.pathDepth != null ? `L${rule.pathDepth}` : '自动';
+  const qs = Array.isArray(rule.queryKeys) && rule.queryKeys.length ? `?${rule.queryKeys.join(',')}` : '';
+  return `${pat} [${depth}${qs}]`;
+}
+
+function renderAggregationSuggestions(container, res, { onApply, onApplyAll, onPreview } = {}) {
+  const shell = buildSuggestionShell(container, res, {
+    summaryText: n => `生成 ${n} 条聚合标识规则建议`,
+    emptyText: '结合当前页面内容与 URL 结构，暂无需新增聚合拆分规则',
+    onApplyAll,
+  });
+  if (!shell) return;
+  for (const item of shell.suggestions) {
+    let bucketRow = null;
+    if (Array.isArray(item.bucketsPreview) && item.bucketsPreview.length) {
+      bucketRow = document.createElement('div');
+      bucketRow.className = 'agg-test-buckets';
+      for (const b of item.bucketsPreview.slice(0, 4)) {
+        const tag = document.createElement('div');
+        tag.className = 'agg-bucket-pill';
+        tag.title = b.aggregationKey;
+        tag.textContent = `${b.aggregationKey} (${b.count})`;
+        bucketRow.appendChild(tag);
+      }
+    }
+    const diffLabel = Array.isArray(item.changes) && item.changes.length ? ` · ${item.changes.join(' · ')}` : '';
+    appendSuggestionCard(shell.list, {
+      container,
+      badgeClass: item.kind === 'refine' ? 'is-refine' : 'is-add',
+      badgeText: item.kind === 'refine' ? `叠加优化已有规则${diffLabel}` : '新增聚合标识规则',
+      countText: `拆分为 ${item.distinctKeysCount || 0} 组 · 命中 ${item.matchedCount || 0} 页`,
+      ruleText: formatAggregationRuleLabel(item.rule),
+      ruleTitle: `${item.rule?.pattern || ''} (depth=${item.rule?.pathDepth ?? 'auto'}, params=${(item.rule?.queryKeys || []).join(',')})`,
+      extraNode: bucketRow,
+      reasonText: item.reason,
+      previewLabel: '预览拆分',
+      applyLabel: item.kind === 'refine' ? '叠加更新' : '+ 采纳',
+      onPreview: () => onPreview?.(item),
+      onApply: () => onApply?.(item),
+    });
+  }
+}
+
+function bindSuggestButtonCore({ btn, resultEl, suggest, renderFn, apply, applyAll, formatAppliedToast, onPreview, onApplied } = {}) {
+  if (!btn || !resultEl) return;
+  if (!btn.dataset.baseLabel) btn.dataset.baseLabel = String(btn.textContent || 'AI 建议').trim();
+  btn.onclick = async () => {
+    btn.disabled = true;
+    const prevLabel = btn.textContent;
+    btn.textContent = 'AI 分析中…';
+    try {
+      const res = await suggest();
+      renderFn(resultEl, res, {
+        onPreview: item => onPreview?.(item),
+        onApply: async item => {
+          const applied = await apply(item);
+          if (!applied?.ok) {
+            toast(applied?.message || '采纳失败', 'err');
+            return applied;
+          }
+          toast(formatAppliedToast(applied, item, false), 'ok');
+          await onApplied?.(applied, [item]);
+          return applied;
+        },
+        onApplyAll: typeof applyAll === 'function' ? async items => {
+          const applied = await applyAll(items);
+          if (!applied?.ok) {
+            toast(applied?.message || '一键采纳失败', 'err');
+            return applied;
+          }
+          toast(formatAppliedToast(applied, items, true), 'ok');
+          await onApplied?.(applied, items);
+          return applied;
+        } : undefined,
+      });
+    } finally {
+      btn.disabled = false;
+      btn.textContent = btn.dataset.hintCount && Number(btn.dataset.hintCount) > 0
+        ? `${btn.dataset.baseLabel} · ${btn.dataset.hintCount}`
+        : (btn.dataset.baseLabel || prevLabel);
+    }
+  };
+}
+
+function bindWhitelistSuggestButton(opts = {}) {
+  return bindSuggestButtonCore({
+    ...opts,
+    renderFn: renderWhitelistSuggestions,
+    formatAppliedToast: (applied, itemOrItems, isBatch) => {
+      if (isBatch) return `已一键采纳 ${applied.appliedCount || itemOrItems.length} 条白名单规则`;
+      return itemOrItems?.replaces
+        ? `已叠加收敛为「${applied.rule}」`
+        : `已采纳白名单规则：${applied.rule}`;
+    },
+  });
+}
+
+function bindAggregationSuggestButton(opts = {}) {
+  if (typeof enhanceSelect === 'function' && opts.depthSelectEl) {
+    enhanceSelect(opts.depthSelectEl, {
+      variant: 'sm',
+      searchPlaceholder: '搜索 Path 层级…',
+      minMenuWidth: 165,
+    });
+  }
+  return bindSuggestButtonCore({
+    ...opts,
+    renderFn: renderAggregationSuggestions,
+    formatAppliedToast: (applied, itemOrItems, isBatch) => {
+      if (isBatch) return `已一键采纳并优化 ${applied.appliedCount || itemOrItems.length} 条聚合标识规则`;
+      return `已采纳聚合规则：${formatAggregationRuleLabel(applied.rule || itemOrItems?.rule)}`;
+    },
+  });
+}
+
+function setSuggestButtonHintCount(btn, count) {
+  if (!btn) return;
+  const n = Math.max(0, Number(count) || 0);
+  if (!btn.dataset.baseLabel) btn.dataset.baseLabel = String(btn.textContent || 'AI 建议').replace(/\s*·\s*\d+$/, '').trim();
+  btn.dataset.hintCount = String(n);
+  btn.classList.toggle('is-suggest-pending', n > 0);
+  if (!btn.disabled) {
+    btn.textContent = n > 0 ? `${btn.dataset.baseLabel} · ${n}` : btn.dataset.baseLabel;
+  }
+}
+
+function renderAggregationRuleTestResult(container, res, { onSelectTab } = {}) {
+  if (!container) return;
+  container.innerHTML = '';
+  if (!res) {
+    container.classList.add('hidden');
+    return;
+  }
+  container.classList.remove('hidden');
+
+  const head = document.createElement('div');
+  head.className = 'wl-test-head';
+  const summary = document.createElement('span');
+  summary.className = 'wl-test-summary';
+  if (!res.ok) {
+    summary.classList.add('is-err');
+    summary.textContent = res.message || '聚合层级规则测试失败';
+  } else {
+    summary.textContent = `检查 ${res.totalTabs} 个页面，命中 ${res.matchedCount} 个 → 识别为 ${res.distinctKeysCount || 0} 个聚合标识`;
+  }
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'wl-test-close';
+  closeBtn.textContent = '×';
+  closeBtn.title = '收起测试结果';
+  closeBtn.onclick = () => {
+    container.innerHTML = '';
+    container.classList.add('hidden');
+  };
+  head.append(summary, closeBtn);
+  container.appendChild(head);
+  if (!res.ok) return;
+
+  const matches = Array.isArray(res.matches) ? res.matches : [];
+  if (!matches.length) {
+    const empty = document.createElement('div');
+    empty.className = 'wl-test-empty';
+    empty.textContent = '当前已打开页面中暂无命中该路径的标签页';
+    container.appendChild(empty);
+    return;
+  }
+
+  const buckets = Array.isArray(res.buckets) ? res.buckets : [];
+  if (buckets.length) {
+    const bucketWrap = document.createElement('div');
+    bucketWrap.className = 'agg-test-buckets';
+    for (const b of buckets.slice(0, 8)) {
+      const tag = document.createElement('div');
+      tag.className = 'agg-bucket-pill';
+      tag.title = b.aggregationKey;
+      tag.textContent = `${b.aggregationKey} (${b.count})`;
+      bucketWrap.appendChild(tag);
+    }
+    container.appendChild(bucketWrap);
+  }
+
+  const list = document.createElement('div');
+  list.className = 'wl-test-list';
+  for (const item of matches.slice(0, 20)) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'wl-test-item';
+    row.title = item.url;
+    const title = document.createElement('span');
+    title.className = 'wl-test-title';
+    title.textContent = item.title || item.url;
+    const keyLine = document.createElement('span');
+    keyLine.className = 'wl-test-url';
+    keyLine.textContent = `标识: ${item.aggregationKey}`;
+    row.append(title, keyLine);
+    row.onclick = () => onSelectTab?.(item);
+    list.appendChild(row);
+  }
+  container.appendChild(list);
+}
+
+function favoriteKeyOf(url) {
+  const s = String(url || '').trim();
+  if (!s) return '';
+  try {
+    const u = new URL(s);
+    u.hash = '';
+    return u.href;
+  } catch {
+    return s;
+  }
+}
+
+function formatRelativeAccessTime(ts, { now = Date.now(), lang } = {}) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n < 946684800000 || n > now + 60000) return '';
+  const isEn = (lang || (typeof getUiLang === 'function' ? getUiLang() : 'zh')) === 'en';
+  const diffSec = Math.max(0, Math.floor((now - n) / 1000));
+  if (diffSec < 10) return isEn ? 'just now' : '刚刚';
+  if (diffSec < 60) return isEn ? `${diffSec}s ago` : `${diffSec}秒前`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return isEn ? `${diffMin}m ago` : `${diffMin}分钟前`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return isEn ? `${diffHour}h ago` : `${diffHour}小时前`;
+  const diffDay = Math.floor(diffHour / 24);
+  return isEn ? `${diffDay}d ago` : `${diffDay}天前`;
+}
+
+function renderFavoritesStrip(container, favorites, openTabKeys, { onOpen, onRemove } = {}) {
+  if (!container) return;
+  const list = Array.isArray(favorites) ? favorites : [];
+  container.innerHTML = '';
+  container.classList.toggle('hidden', !list.length);
+  if (!list.length) return;
+
+  const head = document.createElement('span');
+  head.className = 'fav-bar-label';
+  head.innerHTML = `${icon('starFilled', 12)}<span>置顶收藏</span>`;
+  container.appendChild(head);
+
+  const items = document.createElement('div');
+  items.className = 'fav-bar-items';
+  const liveSet = openTabKeys instanceof Set ? openTabKeys : new Set();
+
+  for (const fav of list) {
+    const key = favoriteKeyOf(fav.key || fav.url);
+    const isLive = liveSet.has(key);
+    const chip = document.createElement('div');
+    chip.className = 'fav-chip' + (isLive ? ' is-live' : '');
+    chip.dataset.favKey = key;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'fav-chip-main';
+    btn.title = isLive
+      ? `${fav.title || fav.url}\n${fav.url}\n已打开，点击快速切换`
+      : `${fav.title || fav.url}\n${fav.url}\n未打开，点击打开并切换`;
+
+    const img = document.createElement('img');
+    img.src = typeof faviconUrl === 'function' ? faviconUrl(fav.url) : '';
+    img.alt = '';
+    img.onerror = () => {
+      img.onerror = null;
+      if (typeof fallbackFaviconDataUrl === 'function') img.src = fallbackFaviconDataUrl(fav.url);
+      else img.style.visibility = 'hidden';
+    };
+
+    const dot = document.createElement('span');
+    dot.className = 'fav-live-dot';
+    dot.setAttribute('aria-hidden', 'true');
+
+    const title = document.createElement('span');
+    title.className = 'fav-title';
+    title.textContent = fav.title || domainOf(fav.url) || fav.url;
+
+    btn.append(img, dot, title);
+    btn.onclick = () => onOpen?.(fav);
+
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'fav-chip-remove';
+    rm.innerHTML = icon('close', 11);
+    rm.title = '取消置顶收藏';
+    rm.setAttribute('aria-label', `取消置顶收藏 ${fav.title || fav.url}`);
+    rm.onclick = e => {
+      e.stopPropagation();
+      onRemove?.(fav);
+    };
+
+    chip.append(btn, rm);
+    items.appendChild(chip);
+  }
+  container.appendChild(items);
+}
+
 function fallbackFaviconDataUrl(url) {
   const d = domainOf(url).toLowerCase();
   let bg = '#3b4866';
@@ -1180,7 +1780,12 @@ function normalizeTabUrl(url) {
   }
 }
 
-function resolveTabDisplayTitle(tab, metaMap = null) {
+function resolveTabDisplayTitle(tab, metaMap = null, manualTabMap = null) {
+  const manual = manualTabMap && tab?.id != null ? manualTabMap[tab.id] : null;
+  if (manual?.title) {
+    const norm = tab?.url ? normalizeTabUrl(tab.url) : '';
+    if (!manual.url || !norm || manual.url === norm) return String(manual.title).trim();
+  }
   const meta = metaMap && tab?.url ? metaMap[normalizeTabUrl(tab.url)] : null;
   if (meta?.source === 'ai' && meta?.title) return String(meta.title).trim();
   return cleanTitle(tab?.title, tab?.url);
@@ -1241,8 +1846,8 @@ const NATIVE_HOST_NAME = 'com.aitab.organizer';
 
 async function buildDaemonInstallCommand() {
   const runtimeId = chrome?.runtime?.id || '';
-  const originFlag = runtimeId ? ` -- --origin chrome-extension://${runtimeId}/` : '';
-  return `cd "<项目目录>/server" && npm run service:install${originFlag}`;
+  const originFlag = runtimeId ? ` --origin chrome-extension://${runtimeId}/` : '';
+  return `git clone https://github.com/jackerjay/tabloom.git ~/tabloom && ~/tabloom/install.sh${originFlag}`;
 }
 
 async function tryWakeLocalService() {

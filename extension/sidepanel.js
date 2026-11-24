@@ -30,6 +30,10 @@ let autoDiscardCtrl = null;
 let tabMeta = {};
 let lockedGroupIds = new Set();
 let manualNamedGroups = new Map();
+let manualTabTitles = {};
+let pendingPaintAfterRename = false;
+let pinnedFavorites = [];
+let recentVisits = {};
 
 function isShellTab(tab) {
   const url = tab?.url || '';
@@ -143,8 +147,17 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
           toast(err?.message || '重命名失败', 'err');
         }
       },
+      onFinish: () => {
+        if (pendingPaintAfterRename) {
+          pendingPaintAfterRename = false;
+          paint();
+        }
+      },
     });
   };
+  if (native) {
+    name.ondblclick = e => { e.stopPropagation(); e.preventDefault(); triggerRename(); };
+  }
   const count = document.createElement('span');
   count.className = 'gcount';
   count.textContent = tabs.length;
@@ -205,18 +218,45 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
       if (typeof fallbackFaviconDataUrl === 'function') img.src = fallbackFaviconDataUrl(t.url);
       else img.style.visibility = 'hidden';
     };
-    const displayTitle = typeof resolveTabDisplayTitle === 'function' ? resolveTabDisplayTitle(t, tabMeta) : cleanTitle(t.title, t.url);
+    const displayTitle = typeof resolveTabDisplayTitle === 'function' ? resolveTabDisplayTitle(t, tabMeta, manualTabTitles) : cleanTitle(t.title, t.url);
     const summary = typeof resolveTabSummary === 'function' ? resolveTabSummary(t, tabMeta) : '';
+    const visitedAt = Math.max(Number(t.lastAccessed) || 0, Number(recentVisits[t.id]) || 0);
+    const ago = typeof formatRelativeAccessTime === 'function' ? formatRelativeAccessTime(visitedAt) : '';
     const titleBtn = document.createElement('button');
     titleBtn.type = 'button';
     titleBtn.className = 't';
     titleBtn.textContent = displayTitle;
-    titleBtn.title = summary ? `${t.title || t.url || ''}\n摘要：${summary}` : (t.title || t.url || '');
+    titleBtn.title = [t.title || t.url || '', ago ? `最近访问：${ago}` : '', summary ? `摘要：${summary}` : '', '双击可重命名标签'].filter(Boolean).join('\n');
     const activate = () => {
       chrome.tabs.update(t.id, { active: true });
       chrome.windows.update(windowId, { focused: true });
     };
-    titleBtn.onclick = e => { e.stopPropagation(); activate(); };
+    if (typeof bindTabTitleDoubleClick === 'function') {
+      bindTabTitleDoubleClick({
+        titleBtn,
+        currentTitle: displayTitle,
+        onActivate: activate,
+        onSave: async nextTitle => {
+          try {
+            const res = await chrome.runtime.sendMessage({ type: 'tab-rename', tabId: t.id, title: nextTitle });
+            if (!res?.ok) throw new Error(res?.message || '重命名失败');
+            manualTabTitles[t.id] = { title: res.title, url: res.url || '', at: Date.now() };
+            toast(`已重命名标签为「${res.title}」`, 'ok');
+            paint();
+          } catch (err) {
+            toast(err?.message || '重命名失败', 'err');
+          }
+        },
+        onFinish: () => {
+          if (pendingPaintAfterRename) {
+            pendingPaintAfterRename = false;
+            paint();
+          }
+        },
+      });
+    } else {
+      titleBtn.onclick = e => { e.stopPropagation(); activate(); };
+    }
     const close = document.createElement('button');
     close.type = 'button';
     close.className = 'close';
@@ -226,6 +266,13 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
     close.onclick = e => { e.stopPropagation(); chrome.tabs.remove(t.id); };
     li.onclick = activate;
     li.append(img, titleBtn);
+    if (ago && t.id !== activeId) {
+      const ageEl = document.createElement('span');
+      ageEl.className = 'sp-visit-age';
+      ageEl.textContent = ago;
+      ageEl.title = `最近访问：${ago}`;
+      li.append(ageEl);
+    }
     if (t.discarded) {
       const asleep = document.createElement('span');
       asleep.className = 'hibernated-badge';
@@ -239,7 +286,30 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
       recent.textContent = '最近浏览';
       li.append(recent);
     }
-    li.append(close);
+    const favKey = typeof favoriteKeyOf === 'function' ? favoriteKeyOf(t.url) : '';
+    const isFav = /^https?:\/\//i.test(t.url || '') && pinnedFavorites.some(f => (f.key || favoriteKeyOf(f.url)) === favKey);
+    const ops = document.createElement('span');
+    ops.className = 'sp-row-ops' + (isFav ? ' has-fav' : '');
+    if (/^https?:\/\//i.test(t.url || '')) {
+      const favBtn = document.createElement('button');
+      favBtn.type = 'button';
+      favBtn.className = 'tab-fav' + (isFav ? ' is-fav' : '');
+      favBtn.innerHTML = icon(isFav ? 'starFilled' : 'star', 12);
+      favBtn.title = isFav ? '取消置顶收藏' : '加入置顶收藏，方便快速切换';
+      favBtn.setAttribute('aria-label', (isFav ? '取消置顶收藏 ' : '加入置顶收藏 ') + displayTitle);
+      favBtn.setAttribute('aria-pressed', String(isFav));
+      favBtn.onclick = async e => {
+        e.stopPropagation();
+        const res = await chrome.runtime.sendMessage({ type: 'favorite-toggle', url: t.url, title: displayTitle });
+        if (!res?.ok) return toast(res?.message || '操作失败', 'err');
+        pinnedFavorites = Array.isArray(res.favorites) ? res.favorites : pinnedFavorites;
+        toast(res.pinned ? '已加入置顶收藏' : '已取消置顶收藏', res.pinned ? 'ok' : 'info');
+        paint();
+      };
+      ops.append(favBtn);
+    }
+    ops.append(close);
+    li.append(ops);
     ul.appendChild(li);
   }
   top.append(head);
@@ -321,12 +391,15 @@ function renderGroup(title, color, tabs, group, idx, activeId) {
   return box;
 }
 
-function scrollActiveTabIntoView(tabId) {
-  if (document.body?.dataset?.spMode === 'settings' || document.hidden || searchTerm || tabId == null) return false;
+let locateFlashTimer = null;
+
+function scrollActiveTabIntoView(tabId, { force = false } = {}) {
+  if ((!force && (document.body?.dataset?.spMode === 'settings' || document.hidden || searchTerm)) || tabId == null) return false;
   const row = $('list')?.querySelector(`li[data-tab-id="${tabId}"]`);
   if (!row) return false;
-  if (typeof row.getBoundingClientRect !== 'function') {
-    row.scrollIntoView({ block: 'nearest' });
+  const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (typeof row.getBoundingClientRect !== 'function' || force) {
+    row.scrollIntoView(force ? { block: 'center', behavior: reduced ? 'auto' : 'smooth' } : { block: 'nearest' });
     return true;
   }
   const rect = row.getBoundingClientRect();
@@ -335,14 +408,105 @@ function scrollActiveTabIntoView(tabId) {
   const minTop = headBottom + 8;
   const maxBottom = (window.innerHeight || document.documentElement?.clientHeight || 800) - 12;
   if (rect.top < minTop || rect.bottom > maxBottom) {
-    const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
     row.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' });
   }
   return true;
 }
 
+async function locateCurrentActiveTab() {
+  try {
+    const hostWindowId = windowId ?? await panelWindowId();
+    const activeTabs = await chrome.tabs.query({ windowId: hostWindowId, active: true }).catch(() => []);
+    const liveActive = (activeTabs || []).find(t => t.windowId === hostWindowId) || null;
+    if (liveActive && !lastData.tabs.some(t => t.id === liveActive.id)) {
+      await refresh();
+    }
+    const candidates = [
+      liveActive && !isShellTab(liveActive) ? liveActive : null,
+      lastData.tabs.find(t => t.id === activeContext.tabId && !isShellTab(t)) || null,
+      lastData.tabs.find(t => t.id === lastData.activeId && !isShellTab(t)) || null,
+      liveActive && !isShellTab(liveActive) ? liveActive : null,
+    ].filter(Boolean);
+    const target = candidates[0] || null;
+    if (!target) {
+      toast('当前窗口暂无可定位的活动标签', 'info');
+      return false;
+    }
+    let needsPaint = false;
+    if (searchTerm) {
+      searchTerm = '';
+      if ($('search')) $('search').value = '';
+      needsPaint = true;
+    }
+    if (Number.isInteger(target.groupId) && target.groupId >= 0) {
+      const targetGroup = lastData.groups.find(g => g.id === target.groupId);
+      if (targetGroup?.collapsed && followExpandedGroupId !== target.groupId) {
+        followExpandedGroupId = target.groupId;
+        needsPaint = true;
+      }
+    }
+    if (activeContext.tabId !== target.id) {
+      activeContext = {
+        tabId: target.id,
+        groupId: target.groupId ?? -1,
+        mode: liveActive?.id === target.id && !isShellTab(liveActive) ? 'active' : 'recent',
+      };
+      needsPaint = true;
+    }
+    pendingFollowScroll = false;
+    if (needsPaint || !$('list')?.querySelector(`li[data-tab-id="${target.id}"]`)) {
+      paint();
+    }
+    if (!scrollActiveTabIntoView(target.id, { force: true })) {
+      toast('当前活动标签未在列表中显示', 'info');
+      return false;
+    }
+    lastScrolledTabId = target.id;
+    const row = $('list')?.querySelector(`li[data-tab-id="${target.id}"]`);
+    if (row?.classList) {
+      if (locateFlashTimer) clearTimeout(locateFlashTimer);
+      row.classList.remove('sp-locate-flash');
+      void row.offsetWidth;
+      row.classList.add('sp-locate-flash');
+      locateFlashTimer = setTimeout(() => {
+        locateFlashTimer = null;
+        row.classList?.remove?.('sp-locate-flash');
+      }, 1200);
+    }
+    return true;
+  } catch (err) {
+    toast(`定位当前标签失败：${err?.message || '未知错误'}`, 'err');
+    return false;
+  }
+}
+
 function paint() {
+  if (document?.activeElement?.classList?.contains?.('gname-input') || document?.activeElement?.classList?.contains?.('tname-input')) {
+    pendingPaintAfterRename = true;
+    return;
+  }
   const { tabs, groups } = lastData;
+  if ($('spFavoritesBar') && typeof renderFavoritesStrip === 'function') {
+    const openTabKeys = new Set();
+    for (const t of tabs || []) {
+      if (/^https?:\/\//i.test(t.url || '')) openTabKeys.add(favoriteKeyOf(t.url));
+    }
+    renderFavoritesStrip($('spFavoritesBar'), pinnedFavorites, openTabKeys, {
+      onOpen: async fav => {
+        const res = await chrome.runtime.sendMessage({ type: 'favorite-open', url: fav.url, key: fav.key, windowId });
+        if (!res?.ok) return toast(res?.message || '切换失败', 'err');
+        toast(res.action === 'switched' ? `已切换到：${fav.title || fav.url}` : `已打开收藏：${fav.title || fav.url}`, 'ok');
+      },
+      onRemove: async fav => {
+        const res = await chrome.runtime.sendMessage({ type: 'favorite-toggle', url: fav.url, pinned: false });
+        if (res?.ok) {
+          pinnedFavorites = Array.isArray(res.favorites) ? res.favorites : [];
+          toast('已取消置顶收藏', 'info');
+          paint();
+        }
+      },
+    });
+  }
   const activeId = activeContext.tabId;
   const followChanged = activeId !== lastFollowTabId;
   const groupChanged = lastFollowGroupId !== activeContext.groupId;
@@ -425,12 +589,13 @@ async function refresh() {
     const hostWindowId = await panelWindowId();
     if (revision !== refreshRevision) return;
     windowId = hostWindowId;
-    const [tabs, groups, active, context, localMeta] = await Promise.all([
+    const [tabs, groups, active, context, localMeta, sessionVisits] = await Promise.all([
       chrome.tabs.query({ windowId: hostWindowId }),
       chrome.tabGroups.query({ windowId: hostWindowId }),
       chrome.tabs.query({ windowId: hostWindowId, active: true }),
       chrome.runtime.sendMessage({ type: 'active-work-tab', windowId: hostWindowId }).catch(() => null),
-      chrome.storage?.local?.get?.(['tabMetaCache', 'lockedGroupIds', 'manualNamedGroups'])?.catch?.(() => ({})) || Promise.resolve({}),
+      chrome.storage?.local?.get?.(['tabMetaCache', 'lockedGroupIds', 'manualNamedGroups', 'manualTabTitles', 'pinnedFavorites'])?.catch?.(() => ({})) || Promise.resolve({}),
+      chrome.storage?.session?.get?.('recentTabVisits')?.catch?.(() => ({})) || Promise.resolve({}),
     ]);
     if (revision !== refreshRevision) return;
     tabMeta = (localMeta?.tabMetaCache && typeof localMeta.tabMetaCache === 'object') ? localMeta.tabMetaCache : {};
@@ -440,6 +605,9 @@ async function refresh() {
         .map(([k, v]) => [Number(k), String(v || '').trim()])
         .filter(([id, v]) => Number.isInteger(id) && id >= 0 && v),
     );
+    manualTabTitles = (localMeta?.manualTabTitles && typeof localMeta.manualTabTitles === 'object') ? localMeta.manualTabTitles : {};
+    pinnedFavorites = Array.isArray(localMeta?.pinnedFavorites) ? localMeta.pinnedFavorites : [];
+    recentVisits = (sessionVisits?.recentTabVisits && typeof sessionVisits.recentTabVisits === 'object') ? sessionVisits.recentTabVisits : {};
     const ownTabs = tabs.filter(tab => tab.windowId === hostWindowId);
     const actualTab = active.find(tab => tab.windowId === hostWindowId) || null;
     const actualId = actualTab?.id ?? null;
@@ -697,8 +865,9 @@ async function updateDupUI() {
       const chip = document.createElement('span');
       chip.className = 'wl-item';
       const txt = document.createElement('span');
-      txt.textContent = domainOf(u) || u;
-      txt.title = u;
+      txt.textContent = (typeof formatWhitelistLabel === 'function' ? formatWhitelistLabel(u) : domainOf(u)) || u;
+      txt.title = `点击对照当前已打开页面测试：${u}`;
+      txt.onclick = () => runWhitelistTest?.(u);
       const rm = document.createElement('button');
       rm.type = 'button';
       rm.textContent = '×';
@@ -711,6 +880,42 @@ async function updateDupUI() {
       chip.append(txt, rm);
       wlEl.append(chip);
     }
+  }
+  await updateAggRulesUI();
+}
+
+async function updateAggRulesUI() {
+  const listEl = $('spAggRuleList');
+  if (!listEl) return;
+  const res = await chrome.runtime.sendMessage({ type: 'aggregation-rule-list' }).catch(() => null);
+  const rules = Array.isArray(res?.rules) ? res.rules : [];
+  listEl.innerHTML = '';
+  for (const r of rules) {
+    const chip = document.createElement('span');
+    chip.className = 'wl-item';
+    const txt = document.createElement('span');
+    txt.textContent = (typeof formatAggregationRuleLabel === 'function' ? formatAggregationRuleLabel(r) : r.pattern) || r.pattern;
+    txt.title = `点击回填并预览该规则对当前标签的聚合标识层级：${r.pattern}`;
+    txt.onclick = () => {
+      if ($('spAggRulePattern')) $('spAggRulePattern').value = r.pattern || '';
+      if ($('spAggRuleDepth')) {
+        $('spAggRuleDepth').value = r.pathDepth == null ? 'auto' : String(r.pathDepth);
+        $('spAggRuleDepth')._searchableSelect?.sync?.();
+      }
+      if ($('spAggRuleQueryKeys')) $('spAggRuleQueryKeys').value = Array.isArray(r.queryKeys) ? r.queryKeys.join(',') : '';
+      runAggRuleTest(r);
+    };
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.textContent = '×';
+    rm.title = '移除聚合层级规则';
+    rm.onclick = async () => {
+      await chrome.runtime.sendMessage({ type: 'aggregation-rule-remove', id: r.id || r.pattern });
+      toast('已移除聚合层级规则', 'info');
+      await updateAggRulesUI();
+    };
+    chip.append(txt, rm);
+    listEl.append(chip);
   }
 }
 
@@ -734,7 +939,7 @@ function scheduleRefresh() {
 }
 
 for (const ev of ['onCreated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved']) {
-  chrome.tabs[ev].addListener(scheduleRefresh);
+  chrome.tabs[ev].addListener(() => { scheduleRefresh(); scheduleSidepanelRuleHints(); });
 }
 chrome.tabs.onActivated.addListener(info => {
   if (windowId !== null && info.windowId !== windowId) return;
@@ -743,7 +948,10 @@ chrome.tabs.onActivated.addListener(info => {
   scheduleRefresh();
 });
 chrome.tabs.onUpdated.addListener((_id, info) => {
-  if (info.title || info.status === 'complete' || info.groupId !== undefined || info.active) scheduleRefresh();
+  if (info.title || info.status === 'complete' || info.groupId !== undefined || info.active) {
+    scheduleRefresh();
+    if (info.status === 'complete' || info.title) scheduleSidepanelRuleHints();
+  }
 });
 for (const ev of ['onCreated', 'onRemoved', 'onUpdated', 'onMoved']) {
   chrome.tabGroups[ev].addListener(scheduleRefresh);
@@ -798,6 +1006,9 @@ $('collapseAll').onclick = async () => {
   refresh();
 };
 
+if ($('locateCurrentTab')) $('locateCurrentTab').onclick = () => locateCurrentActiveTab();
+if ($('locateActiveHeadBtn')) $('locateActiveHeadBtn').onclick = () => locateCurrentActiveTab();
+
 $('expandAll').onclick = async () => {
   followExpandedGroupId = null;
   for (const g of lastData.groups) {
@@ -846,16 +1057,148 @@ if ($('spDensity')) {
     toast(density === 'compact' ? '已开启紧凑卡片密度' : '已切换为标准卡片密度', 'ok');
   };
 }
+async function runWhitelistTest(ruleOverride = null) {
+  const target = ruleOverride != null ? String(ruleOverride) : ($('spWhitelistInput')?.value || '').trim();
+  const res = await chrome.runtime.sendMessage({ type: 'dup-whitelist-test', rule: target });
+  if (typeof renderWhitelistTestResult === 'function') {
+    renderWhitelistTestResult($('spWhitelistTestResult'), res, {
+      onSelectTab: async item => {
+        try { await chrome.tabs.update(item.id, { active: true }); } catch { /* ignore */ }
+        if (item.windowId != null) {
+          try { await chrome.windows?.update?.(item.windowId, { focused: true }); } catch { /* ignore */ }
+        }
+      },
+    });
+  }
+  return res;
+}
+if ($('spWhitelistTestBtn')) {
+  $('spWhitelistTestBtn').onclick = () => runWhitelistTest();
+}
+if (typeof bindWhitelistSuggestButton === 'function') {
+  bindWhitelistSuggestButton({
+    btn: $('spWhitelistSuggestBtn'),
+    resultEl: $('spWhitelistSuggestResult'),
+    suggest: () => chrome.runtime.sendMessage({ type: 'dup-whitelist-suggest', windowId }),
+    apply: item => chrome.runtime.sendMessage({
+      type: 'dup-whitelist-apply-suggestion',
+      rule: item.rule,
+      replaces: item.replaces || null,
+      replacesList: item.replacesList || null,
+    }),
+    applyAll: items => chrome.runtime.sendMessage({ type: 'dup-whitelist-apply-all', items }),
+    onPreview: item => runWhitelistTest(item.rule),
+    onApplied: async () => {
+      await updateDupUI();
+      refreshSidepanelRuleHints();
+    },
+  });
+}
 if ($('spWhitelistAddBtn') && $('spWhitelistInput')) {
   $('spWhitelistAddBtn').onclick = async () => {
     const val = ($('spWhitelistInput').value || '').trim();
-    if (!val) return toast('请输入域名或网址', 'info');
+    if (!val) return toast('请输入域名、通配路径或正则规则', 'info');
     const res = await chrome.runtime.sendMessage({ type: 'dup-whitelist-add', url: val, host: val });
     if (!res?.ok) return toast(res?.message || '添加失败', 'err');
     $('spWhitelistInput').value = '';
-    toast(`已加入去重白名单：${val}`, 'ok');
-    updateDupUI();
+    toast(`已加入去重白名单：${res.rule || val}`, 'ok');
+    await updateDupUI();
+    if ($('spWhitelistTestResult') && !$('spWhitelistTestResult').classList.contains('hidden')) {
+      await runWhitelistTest('');
+    }
   };
+  $('spWhitelistInput').onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); $('spWhitelistAddBtn').click(); }
+  };
+}
+
+async function runAggRuleTest(ruleOverride = null) {
+  const payload = ruleOverride
+    ? { type: 'aggregation-rule-test', rule: ruleOverride }
+    : {
+      type: 'aggregation-rule-test',
+      pattern: ($('spAggRulePattern')?.value || '').trim(),
+      pathDepth: $('spAggRuleDepth')?.value || 'auto',
+      queryKeys: ($('spAggRuleQueryKeys')?.value || '').trim(),
+    };
+  const res = await chrome.runtime.sendMessage(payload);
+  if (typeof renderAggregationRuleTestResult === 'function') {
+    renderAggregationRuleTestResult($('spAggRuleTestResult'), res, {
+      onSelectTab: async item => {
+        try { await chrome.tabs.update(item.id, { active: true }); } catch { /* ignore */ }
+        if (item.windowId != null) {
+          try { await chrome.windows?.update?.(item.windowId, { focused: true }); } catch { /* ignore */ }
+        }
+      },
+    });
+  }
+  return res;
+}
+let spRuleHintsTimer = null;
+async function refreshSidepanelRuleHints() {
+  if (typeof setSuggestButtonHintCount !== 'function') return;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'rule-optimization-hints', windowId });
+    if (res?.ok) {
+      setSuggestButtonHintCount($('spWhitelistSuggestBtn'), res.whitelistCount);
+      setSuggestButtonHintCount($('spAggRuleSuggestBtn'), res.aggregationCount);
+    }
+  } catch { /* ignore */ }
+}
+function scheduleSidepanelRuleHints() {
+  if (spRuleHintsTimer) clearTimeout(spRuleHintsTimer);
+  spRuleHintsTimer = setTimeout(() => { spRuleHintsTimer = null; refreshSidepanelRuleHints(); }, 450);
+}
+
+if ($('spAggRuleTestBtn')) {
+  $('spAggRuleTestBtn').onclick = () => runAggRuleTest();
+}
+if (typeof bindAggregationSuggestButton === 'function') {
+  bindAggregationSuggestButton({
+    btn: $('spAggRuleSuggestBtn'),
+    resultEl: $('spAggRuleSuggestResult'),
+    depthSelectEl: $('spAggRuleDepth'),
+    suggest: () => chrome.runtime.sendMessage({ type: 'aggregation-rule-suggest', windowId }),
+    apply: item => chrome.runtime.sendMessage({
+      type: 'aggregation-rule-apply-suggestion',
+      rule: item.rule,
+      replaces: item.replaces || null,
+      replacesList: item.replacesList || null,
+    }),
+    applyAll: items => chrome.runtime.sendMessage({ type: 'aggregation-rule-apply-all', items }),
+    onPreview: item => {
+      if ($('spAggRulePattern')) $('spAggRulePattern').value = item.rule?.pattern || '';
+      if ($('spAggRuleDepth')) {
+        $('spAggRuleDepth').value = item.rule?.pathDepth == null ? 'auto' : String(item.rule.pathDepth);
+        $('spAggRuleDepth')._searchableSelect?.sync?.();
+      }
+      if ($('spAggRuleQueryKeys')) $('spAggRuleQueryKeys').value = Array.isArray(item.rule?.queryKeys) ? item.rule.queryKeys.join(',') : '';
+      runAggRuleTest(item.rule);
+    },
+    onApplied: async (_applied, items) => {
+      await updateAggRulesUI();
+      refreshSidepanelRuleHints();
+      if (items?.[0]?.rule) await runAggRuleTest(items[0].rule);
+    },
+  });
+}
+if ($('spAggRuleAddBtn')) {
+  $('spAggRuleAddBtn').onclick = async () => {
+    const pattern = ($('spAggRulePattern')?.value || '').trim();
+    if (!pattern) return toast('请输入网址或通配路径规则', 'info');
+    const pathDepth = $('spAggRuleDepth')?.value || 'auto';
+    const queryKeys = ($('spAggRuleQueryKeys')?.value || '').trim();
+    const res = await chrome.runtime.sendMessage({ type: 'aggregation-rule-add', pattern, pathDepth, queryKeys });
+    if (!res?.ok) return toast(res?.message || '添加失败', 'err');
+    $('spAggRulePattern').value = '';
+    if ($('spAggRuleQueryKeys')) $('spAggRuleQueryKeys').value = '';
+    toast('已添加聚合标识层级规则', 'ok');
+    await updateAggRulesUI();
+    await runAggRuleTest(res.rule);
+  };
+  for (const el of [$('spAggRulePattern'), $('spAggRuleQueryKeys')]) {
+    if (el) el.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); $('spAggRuleAddBtn').click(); } };
+  }
 }
 async function refreshSidepanelBookmarkStatus() {
   if (!$('spBookmarkStatus')) return;
@@ -922,6 +1265,14 @@ chrome.storage.onChanged.addListener((changes, area) => {
     paint();
   }
   if (area === 'local' && changes.groupArchives) refreshArchives();
+  if (area === 'local' && changes.manualTabTitles) {
+    manualTabTitles = changes.manualTabTitles.newValue || {};
+    paint();
+  }
+  if (area === 'local' && changes.pinnedFavorites) {
+    pinnedFavorites = Array.isArray(changes.pinnedFavorites.newValue) ? changes.pinnedFavorites.newValue : [];
+    paint();
+  }
 });
 
 /* Command+K palette 定位分组：侧边栏与标签条同步，故展开走 chrome.tabGroups */
@@ -1024,6 +1375,7 @@ deckToggle.onclick = () => setDeck($('deck').classList.contains('hidden'));
   };
   refreshHealthPill($('health'), { onStartRequest: wakeFromPill });
   refreshPanelSearchShortcut();
+  refreshSidepanelRuleHints();
   modelCtrl = await initModelSelect($('model'), {
     refreshBtn: $('refreshModels'),
     metaEl: $('model-meta'),

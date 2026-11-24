@@ -1,0 +1,22 @@
+{
+  "name": "tabloom",
+  "version": "0.4.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "repository": "https://github.com/jackerjay/tabloom",
+  "description": "TabLoom — Local-first Chrome MV3 AI tab workbench, background daemon & tab inspection CLI",
+  "bin": {
+    "tabloom": "./scripts/tab-cli.mjs"
+  },
+  "scripts": {
+    "setup": "bash ./install.sh",
+    "start": "node server/server.mjs",
+    "cli": "node scripts/tab-cli.mjs",
+    "service:install": "node scripts/service.mjs install",
+    "service:status": "node scripts/service.mjs status",
+    "service:uninstall": "node scripts/service.mjs uninstall",
+    "test": "for f in scripts/test-*.mjs; do node \"$f\"; done",
+    "test:e2e": "node scripts/e2e-real-browser.mjs"
+  }
+}

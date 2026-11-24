@@ -634,6 +634,16 @@ try {
     document.getElementById('autoDiscardCustomApply').click();
   })()`);
   await until(() => sp.eval(`chrome.storage.sync.get('settings').then(r => r.settings?.autoDiscardEnabled === true && r.settings?.autoDiscardMinutes === 120 && document.getElementById('autoDiscardMinutes').value === '120')`), 'Custom autoDiscard 2 hours (120m) did not persist cleanly');
+  const spAggDepthEnhanced = await sp.eval(`(() => {
+    const sel = document.getElementById('spAggRuleDepth');
+    const trig = sel?.nextElementSibling;
+    if (!sel || !sel.classList.contains('ui-ss-native') || !trig || !trig.classList.contains('ui-ss-trigger')) return false;
+    trig.click();
+    const menuOpen = !!document.querySelector('.ui-ss-menu');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    return menuOpen && trig.classList.contains('is-sm');
+  })()`);
+  assert(spAggDepthEnhanced, '#spAggRuleDepth must use unified SearchableSelect (.ui-ss-trigger.is-sm) and open .ui-ss-menu');
   await sp.shot('e2e-custom-delay-368.png');
   console.log('PASS [E2E] Generic SearchableSelect (#model), custom autoDelay (120s), and autoDiscardMinutes (120m) verified at 368px');
 

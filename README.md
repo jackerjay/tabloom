@@ -12,11 +12,18 @@
   <b>English</b> · <a href="./README.zh-CN.md">简体中文</a> · <a href="./LICENSE">MIT License</a>
 </p>
 
-[Product Walkthrough](./docs/media/tabloom-walkthrough.mp4) · [Capabilities](#core-capabilities--solutions) · [Screenshots](#live-screenshots) · [3-Minute Quick Start](#3-minute-quick-start)
+[Product Walkthrough](./docs/media/tabloom-walkthrough.mp4) · [1-Minute Install](#1-minute-quick-start-zero-build--one-command) · [Capabilities](#core-capabilities--solutions) · [Screenshots](#live-screenshots)
 
 </div>
 
 ---
+
+> [!TIP]
+> ### ⚡ 1-Minute One-Command Install / Update (Zero Build Step)
+> ```bash
+> git clone https://github.com/jackerjay/tabloom.git ~/tabloom && ~/tabloom/install.sh --open
+> ```
+> Automatically clones to `~/tabloom`, verifies Node 18+, registers the macOS `LaunchAgent` (`com.aitab.organizer`) + `NativeMessagingHosts`, discovers installed Chrome/Brave/Edge/Arc extension IDs, and reveals `~/tabloom/extension` in Finder for `chrome://extensions` **Load unpacked**. Re-run `./install.sh` anytime to update (`./install.sh --uninstall` removes background registration).
 
 > With 60+ open tabs, your browser tab strip shrinks into unreadable favicons; the same technical doc or GitHub PR gets opened four or five times; finding a page you closed yesterday means digging endlessly through History; and your laptop fans spin up because you are afraid to close active work contexts.
 >
@@ -160,35 +167,23 @@ flowchart LR
 
 ---
 
-## 3-Minute Quick Start
+## 1-Minute Quick Start (Zero Build · One Command)
 
-### 1. Enter the Project Directory
+### 1. One-Command Daemon & Service Setup
 
 ```bash
-cd tabloom
+# Fresh setup (clones repo, checks Node 18+, installs LaunchAgent + Native Messaging, starts 127.0.0.1:8787)
+git clone https://github.com/jackerjay/tabloom.git ~/tabloom && ~/tabloom/install.sh --open
 ```
 
-### 2. Load the Chrome Extension (Zero Build Step)
+> Already cloned? Simply run **`./install.sh`** (or `npm run setup`) inside the repository — re-running is idempotent and safely pulls updates, restarts the daemon, and verifies `/health`. Pass `--with-acp` to install optional `server/` npm dependencies, or `./install.sh --uninstall` to remove LaunchAgent & Native Messaging registration.
+
+### 2. Load the Chrome Extension (First Time Only)
 
 1. Open Chrome / Brave / Edge and visit `chrome://extensions`.
 2. Enable **Developer mode** in the top-right corner.
-3. Click **Load unpacked** and select the [`extension/`](./extension) directory inside this repository.
+3. Click **Load unpacked** and select `~/tabloom/extension` (passing `--open` reveals it directly in Finder).
 4. Open a new tab (or press `⌘K` / `Ctrl+K`) to launch **TabLoom Workbench**.
-
-### 3. Start the Local AI Daemon (Optional, for Semantic Grouping)
-
-```bash
-cd server
-npm install
-node server.mjs
-```
-
-To let the extension wake the daemon automatically via macOS LaunchAgent + Chrome Native Messaging (Linux/Windows users simply run `node server.mjs`):
-
-```bash
-cd server
-npm run service:install
-```
 
 > **Permissions note:** `<all_urls>` and `scripting` are used strictly on demand to extract the active page's short snippet for semantic grouping and to mount the optional shadow-DOM floating `⌘K` pill (`127.0.0.1`-only daemon with strict `Host`/`Origin` validation).
 
@@ -203,21 +198,21 @@ Once running, the top-right status badge switches to **Daemon Online** alongside
 │   ├── icons/              # TabLoom icons (16 / 32 / 48 / 128px)
 │   ├── vendor/             # Open-source dependency (SortableJS 1.15.7)
 │   ├── home.*              # New Tab AI workbench (masonry drag, hero search, settings drawer)
-│   ├── sidepanel.*         # Native Side Panel (Live Tab List + Full Settings dual modes)
+│   ├── sidepanel.*         # Native Side Panel (Live Tab List + Locate Active + Favorites + Settings)
 │   ├── palette.js          # ⌘K unified search (Direct URL / Tabs / Bookmarks b / History h / Google g)
 │   ├── background.js       # Dedup guard, Native Host wake-up, idle sleep scheduler & group sync
 │   ├── i18n.js             # Live 中文 / English translation engine
 │   └── ui.js               # Vector scoring, SearchableSelect, theme engine & toast notifications
 ├── server/                 # 127.0.0.1:8787 local AI daemon & multi-CLI adapter
 ├── docs/                   # Screenshots, animated GIFs & product walkthrough video
-├── scripts/                # 20 unit test suites + Brave CDP real-browser E2E suite
+├── scripts/                # `tabloom` CLI + 25 unit test suites + Brave CDP E2E suite
 └── LICENSE                 # MIT License
 ```
 
 Run tests:
 
 ```bash
-# Run all 20 Node unit test suites
+# Run all 25 Node unit test suites
 for f in scripts/test-*.mjs; do node "$f"; done
 
 # Run full real Brave + CDP end-to-end verification

@@ -12,11 +12,18 @@
   <a href="./README.md">English</a> · <b>简体中文</b> · <a href="./LICENSE">MIT License</a>
 </p>
 
-[产品实操演示](./docs/media/tabloom-walkthrough.mp4) · [核心能力](#核心能力与场景解法) · [实机截图展示](#实机截图一览) · [3 分钟快速安装](#3-分钟快速上手)
+[产品实操演示](./docs/media/tabloom-walkthrough.mp4) · [1 分钟一键安装](#1-分钟快速安装零构建--一行命令) · [核心能力](#核心能力与场景解法) · [实机截图展示](#实机截图一览)
 
 </div>
 
 ---
+
+> [!TIP]
+> ### ⚡ 1 分钟一键安装 / 更新（零构建 · 一行命令）
+> ```bash
+> git clone https://github.com/jackerjay/tabloom.git ~/tabloom && ~/tabloom/install.sh --open
+> ```
+> 自动克隆至 `~/tabloom`、检测 Node 18+、注册 macOS `LaunchAgent`（`com.aitab.organizer`）与 `NativeMessagingHosts`、自动发现本机 Chrome / Brave / Edge / Arc 已加载的扩展 ID，并在 Finder 高亮 `~/tabloom/extension` 供 `chrome://extensions` 加载。日常升级重跑 `./install.sh` 即可（卸载常驻：`./install.sh --uninstall`）。
 
 > 开着 60 个标签页时，浏览器顶部只剩一排无法辨认的 favicon；同一篇技术文档或 GitHub PR 重复打开了四五个；想找昨天刚关掉的页面却要在 History 里大海捞针；风扇狂转却不敢随便关闭工作现场。
 >
@@ -160,35 +167,23 @@ flowchart LR
 
 ---
 
-## 3 分钟快速上手
+## 1 分钟快速安装（零构建 · 一行命令）
 
-### 1. 进入项目目录
+### 1. 一条命令安装或更新本地 AI 守护服务
 
 ```bash
-cd tabloom
+# 未下载仓库时（克隆 + 检测 Node 18+ + 安装 LaunchAgent 与 Native Messaging + 校验 127.0.0.1:8787）
+git clone https://github.com/jackerjay/tabloom.git ~/tabloom && ~/tabloom/install.sh --open
 ```
 
-### 2. 加载 Chrome 扩展（零构建依赖）
+> 若已经克隆仓库，直接在根目录执行 **`./install.sh`**（或 `npm run setup`）即可幂等升级并重启服务；如需同时安装可选 ACP npm 依赖可传 `--with-acp`；卸载常驻运行 `./install.sh --uninstall`。
+
+### 2. 加载 Chrome 扩展（仅首次需要）
 
 1. 打开 Chrome / Brave / Edge 浏览器，访问 `chrome://extensions`。
 2. 开启右上角 **开发者模式（Developer mode）**。
-3. 点击 **加载已解压的扩展程序（Load unpacked）**，选择仓库内的 [`extension/`](./extension) 目录。
+3. 点击 **加载已解压的扩展程序（Load unpacked）**，选择 `~/tabloom/extension`（传入 `--open` 时会自动在 Finder 高亮）。
 4. 打开一个新标签页（或按 `⌘K`），即可进入 **织页 TabLoom** 工作台。
-
-### 3. 启动本地 AI 守护服务（启用智能语义归组）
-
-```bash
-cd server
-npm install
-node server.mjs
-```
-
-如需让扩展在 macOS 上开机/打开浏览器时通过 LaunchAgent 与 Chrome Native Messaging 自动拉起守护进程（Linux/Windows 请直接运行 `node server.mjs`）：
-
-```bash
-cd server
-npm run service:install
-```
 
 > **权限说明**：`<all_urls>` 与 `scripting` 仅在工作需要时用于提取当前标签页摘要（用于本地/CLI 语义归组）及渲染可关闭的 Shadow DOM 右侧悬浮 `⌘K` 胶囊；本地服务强制校验本机 `127.0.0.1` 回环地址与可信扩展来源 `Origin`。
 
@@ -203,14 +198,14 @@ npm run service:install
 │   ├── icons/              # 织页 TabLoom 品牌图标（16 / 32 / 48 / 128px）
 │   ├── vendor/             # 开源依赖（SortableJS 1.15.7）
 │   ├── home.*              # 新标签页 AI 工作台（含瀑布流拖拽、Hero 搜索、抽屉设置）
-│   ├── sidepanel.*         # 原生侧边栏（标签视图 + 全量设置双模式）
+│   ├── sidepanel.*         # 原生侧边栏（标签视图 + 一键定位 + 置顶收藏 + 全量设置）
 │   ├── palette.js          # ⌘K 分层搜索面板（网址直达 / 标签 / 书签 b / 历史 h / Google g）
 │   ├── background.js       # 防重拦截、Native Host 唤醒、休眠调度与组同步
 │   ├── i18n.js             # 中 / 英双语实时翻译引擎
 │   └── ui.js               # 向量余弦评分、通用 SearchableSelect、主题系统与 Toast
 ├── server/                 # 127.0.0.1:8787 本地 AI 守护与多 CLI 适配器
 ├── docs/                   # 产品宣传截图与实操演示视频/GIF
-├── scripts/                # 20 组单元测试 + Brave CDP 真实浏览器端到端回归
+├── scripts/                # `tabloom` CLI + 25 组单元测试 + Brave CDP 端到端回归
 └── LICENSE                 # MIT 开源协议
 ```
 

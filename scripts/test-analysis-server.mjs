@@ -9,6 +9,22 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 import { AnalysisCache, CACHE_TTL_MS, CACHE_MAX_ENTRIES } from '../server/analysis-cache.mjs';
+import {
+  auditGroupAggregation,
+  buildBatchPrefixClusters,
+  buildWhitelistSuggestions,
+  clusterTabsByContentTheme,
+  consolidateAndAuditGroups,
+  distillGroupProfiles,
+  evaluateWhitelistPatternAgainstTabs,
+  extractSystemTokens,
+  extractUrlProfile,
+  inferTabContentTopic,
+  isGenericDomainGroupName,
+  normalizeAggregationRules,
+  resolveTabAggregationIdentity,
+  suggestLabelForTabs,
+} from '../server/tab-intelligence.mjs';
 
 const sourceURL = new URL('../server/server.mjs', import.meta.url);
 const source = readFileSync(sourceURL, 'utf8');
@@ -41,6 +57,9 @@ function harness({ file = path.join(root, `cache-${++nextFile}.json`), kind = 'a
     close() { this.dead = true; }
   }
   const context = vm.createContext({ URL, AbortController, createHash, AnalysisCache: Cache,
+    auditGroupAggregation, buildBatchPrefixClusters, buildWhitelistSuggestions, clusterTabsByContentTheme, consolidateAndAuditGroups,
+    distillGroupProfiles, extractSystemTokens, extractUrlProfile, inferTabContentTopic, isGenericDomainGroupName,
+    normalizeAggregationRules, resolveTabAggregationIdentity, suggestLabelForTabs,
     AcpClient: MockAcpClient, path, os, fileURLToPath, setTimeout, clearTimeout,
     console: { log() {}, error() {} }, process: { env, pid: process.pid },
     existsSync: filename => kind === 'acp' && (filename.endsWith('/.codex-home/config.toml') || filename.endsWith('/.codex-home')),
@@ -74,6 +93,7 @@ test('ACP sees actual 1200-character body, title rules and the extended JSON sch
     const payload = tabsFromPrompt(text);
     assert.equal(payload[0].snippet, snippet);
     assert.match(text, /阅读正文并总结实际页面主题/);
+    assert.match(text, /高区分度功能短标题/);
     assert.match(text, /中文不超过20字，英文不超过8词/);
     assert.match(text, /禁止仅用网站名\/域名/);
     assert.match(text, /不要调用任何工具/);
@@ -433,6 +453,15 @@ test('buildMessages includes existingGroupAnchors, summaryHint for hibernated ta
   assert.match(h.prompts[0].text, /React Compiler Guide/);
   assert.match(h.prompts[0].text, /summaryHint.*LCP optimization/);
   assert.equal(res.groups[0].name, 'Frontend Performance & Caching');
+});
+
+test('validateTitle rejects bare generic placeholders while preserving role-specific titles', async () => {
+  const h = harness();
+  const sample = { id: 1, url: 'https://console.example.com/deploy/config/namespace/prod' };
+  for (const bare of ['控制台', '工作台', '首页', '配置', '文档', 'Dashboard', 'console']) {
+    assert.equal(h.api.validateTitle(bare, sample, 'zh'), null, `expected bare title "${bare}" to be rejected`);
+  }
+  assert.equal(h.api.validateTitle('ConfigSys prod 命名空间', sample, 'zh'), 'ConfigSys prod 命名空间');
 });
 
 let passed = 0;

@@ -18,7 +18,7 @@
   let generation = 0, previousFocus = null, composing = false;
   let pendingFocusToken = 0, pendingFocusTabId = null;
   let loading = false, loadFailed = false, currentWindowId = null;
-  let data = { tabs: [], groups: [], tabMeta: {}, history: [], bookmarks: [] };
+  let data = { tabs: [], groups: [], tabMeta: {}, history: [], bookmarks: [], favorites: [], recentVisits: {}, manualTabTitles: {} };
   let baseProvider = 'all', bookmarkToken = 0, bookmarkTimer = null, bookmarkQuery = '', remoteBookmarks = [];
   let historyToken = 0, historyTimer = null, historyQuery = '', remoteHistory = [];
   let pendingDestination = null, activationToken = 0;
@@ -107,10 +107,53 @@
   function itemUrl(it) {
     if (!it) return '';
     if (it.kind === 'url') return it.matchedTab?.url || it.url || '';
+    if (it.kind === 'favorite') return it.url || '';
     if (it.kind === 'tab') return it.tab?.url || '';
     if (it.kind === 'history') return it.item?.url || '';
     if (it.kind === 'bookmark') return it.bookmark?.url || '';
     return '';
+  }
+
+  function itemRawTitle(it) {
+    if (!it) return '';
+    if (it.kind === 'url') return it.matchedTab?.title || it.historyTitle || it.title || it.url || '';
+    if (it.kind === 'favorite') return it.title || it.url || '';
+    if (it.kind === 'tab') return it.title || it.tab?.title || it.tab?.url || '';
+    if (it.kind === 'history') return it.title || it.item?.title || it.item?.url || '';
+    if (it.kind === 'bookmark') return it.bookmark?.title || it.bookmark?.url || '';
+    return '';
+  }
+
+  function favKeyOf(url) {
+    if (typeof favoriteKeyOf === 'function') return favoriteKeyOf(url);
+    return String(url || '').split('#')[0];
+  }
+
+  function favoriteKeySet() {
+    const out = new Set();
+    for (const f of data.favorites || []) {
+      const k = favKeyOf(f?.key || f?.url);
+      if (k) out.add(k);
+    }
+    return out;
+  }
+
+  async function toggleFavoriteInPalette(url, title) {
+    if (!/^https?:\/\//i.test(url || '') || !open || disposed) return;
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'favorite-toggle', url, title });
+      if (!open || disposed) return;
+      if (!res?.ok) {
+        toast(trText(res?.message || '操作失败'), 'err');
+        return;
+      }
+      if (Array.isArray(res.favorites)) data.favorites = res.favorites;
+      toast(trText(res.pinned ? '已加入置顶收藏' : '已取消置顶收藏'), res.pinned ? 'ok' : 'info');
+      refresh(true);
+      focusInput();
+    } catch {
+      if (open && !disposed) toast(trText('收藏操作失败'), 'err');
+    }
   }
 
   async function writeClipboardText(text) {
@@ -170,15 +213,21 @@
     const bookmarksPromise = typeof chrome !== 'undefined' && chrome.bookmarks?.getTree
       ? chrome.bookmarks.getTree().then(flattenBookmarksTree).catch(() => [])
       : Promise.resolve([]);
-    const [tabs, groups, state, localMeta, history, bookmarks] = await Promise.all([
+    const [tabs, groups, state, localMeta, history, bookmarks, favMeta, recentMeta, manualTabMeta] = await Promise.all([
       chrome.tabs.query({}), chrome.tabGroups.query({}),
       standalone && !embedded ? chrome.runtime.sendMessage({ type: 'browser-search-state' }).catch(() => null) : null,
       chrome.storage?.local?.get?.('tabMetaCache')?.catch?.(() => ({})) || Promise.resolve({}),
       historyPromise,
       bookmarksPromise,
+      chrome.storage?.local?.get?.('pinnedFavorites')?.catch?.(() => ({})) || Promise.resolve({}),
+      chrome.storage?.session?.get?.('recentTabVisits')?.catch?.(() => ({})) || Promise.resolve({}),
+      chrome.storage?.local?.get?.('manualTabTitles')?.catch?.(() => ({})) || Promise.resolve({}),
     ]);
     const tabMeta = (localMeta?.tabMetaCache && typeof localMeta.tabMetaCache === 'object') ? localMeta.tabMetaCache : {};
-    return { tabs, groups, state, tabMeta, history: Array.isArray(history) ? history : [], bookmarks: Array.isArray(bookmarks) ? bookmarks : [] };
+    const favorites = Array.isArray(favMeta?.pinnedFavorites) ? favMeta.pinnedFavorites : [];
+    const recentVisits = (recentMeta?.recentTabVisits && typeof recentMeta.recentTabVisits === 'object') ? recentMeta.recentTabVisits : {};
+    const manualTabTitles = (manualTabMeta?.manualTabTitles && typeof manualTabMeta.manualTabTitles === 'object') ? manualTabMeta.manualTabTitles : {};
+    return { tabs, groups, state, tabMeta, history: Array.isArray(history) ? history : [], bookmarks: Array.isArray(bookmarks) ? bookmarks : [], favorites, recentVisits, manualTabTitles };
   }
 
   function openSidePanel() {
@@ -249,6 +298,10 @@
     return best;
   }
 
+  function tabVisitTime(t) {
+    return Math.max(Number(t?.lastAccessed) || 0, Number(data.recentVisits?.[t?.id]) || 0);
+  }
+
   function buildNativeItems(q, direct = null, excludeTabId = null) {
     const { provider } = searchInput();
     if (provider === 'bookmarks' || provider === 'google' || provider === 'history') {
@@ -262,8 +315,8 @@
     // 划分「最近打开」集合（按 lastAccessed 倒序取前 RECENT_TAB_LIMIT 条，排除当前所在页避免自跳转干扰）
     const recentIds = new Set(
       eligibleTabs
-        .filter(t => !(standalone && t.id === currentTabId) && Number.isFinite(t.lastAccessed) && t.lastAccessed > 0)
-        .sort((a, b) => b.lastAccessed - a.lastAccessed)
+        .filter(t => !(standalone && t.id === currentTabId) && tabVisitTime(t) > 0)
+        .sort((a, b) => tabVisitTime(b) - tabVisitTime(a))
         .slice(0, RECENT_TAB_LIMIT)
         .map(t => t.id),
     );
@@ -271,7 +324,7 @@
     const tabItems = [];
     for (const t of eligibleTabs) {
       if (excludeTabId != null && t.id === excludeTabId) continue;
-      const title = typeof resolveTabDisplayTitle === 'function' ? resolveTabDisplayTitle(t, tabMeta) : cleanTitle(t.title, t.url);
+      const title = typeof resolveTabDisplayTitle === 'function' ? resolveTabDisplayTitle(t, tabMeta, data.manualTabTitles) : cleanTitle(t.title, t.url);
       const summary = typeof resolveTabSummary === 'function' ? resolveTabSummary(t, tabMeta) : '';
       const groupTitle = gname.get(t.groupId) || '';
       const s = direct
@@ -299,13 +352,13 @@
       else tabItems.push(item);
     }
     const sortTabsByVector = (a, b) => (b.score - a.score)
-      || ((b.tab.lastAccessed || 0) - (a.tab.lastAccessed || 0));
-    recentItems.sort(query ? sortTabsByVector : (a, b) => (b.tab.lastAccessed || 0) - (a.tab.lastAccessed || 0));
+      || (tabVisitTime(b.tab) - tabVisitTime(a.tab));
+    recentItems.sort(query ? sortTabsByVector : (a, b) => tabVisitTime(b.tab) - tabVisitTime(a.tab));
     tabItems.sort(
       query
         ? sortTabsByVector
         : (a, b) => (standalone ? Number(a.tab.id === currentTabId) - Number(b.tab.id === currentTabId) : 0)
-          || ((b.tab.lastAccessed || 0) - (a.tab.lastAccessed || 0)),
+          || (tabVisitTime(b.tab) - tabVisitTime(a.tab)),
     );
     if (standalone) {
       return {
@@ -403,7 +456,7 @@
     const eligibleTabs = data.tabs.filter(t => !isOwnSearch(t.url) && /^https?:/.test(t.url || ''));
     const matchedTab = eligibleTabs.find(t => (typeof urlsMatchForDirectJump === 'function' ? urlsMatchForDirectJump(t.url, direct.url) : t.url === direct.url)) || null;
     if (matchedTab) {
-      const title = typeof resolveTabDisplayTitle === 'function' ? resolveTabDisplayTitle(matchedTab, tabMeta) : cleanTitle(matchedTab.title, matchedTab.url);
+      const title = typeof resolveTabDisplayTitle === 'function' ? resolveTabDisplayTitle(matchedTab, tabMeta, data.manualTabTitles) : cleanTitle(matchedTab.title, matchedTab.url);
       return {
         kind: 'url',
         section: 'direct',
@@ -426,6 +479,34 @@
       title: direct.url,
       historyTitle: historyTitle && historyTitle !== direct.url ? historyTitle : '',
     };
+  }
+
+  function buildFavoriteItems(q, openUrls, direct = null) {
+    const { provider } = searchInput();
+    if (provider !== 'all' && provider !== 'tabs') return [];
+    const list = Array.isArray(data.favorites) ? data.favorites : [];
+    if (!list.length) return [];
+    const query = q.trim();
+    const openKeys = new Set();
+    for (const u of openUrls || []) openKeys.add(favKeyOf(u));
+    if (direct && direct.url) openKeys.add(favKeyOf(direct.url));
+    const items = [];
+    for (const fav of list) {
+      const url = String(fav?.url || '');
+      if (!/^https?:\/\//i.test(url)) continue;
+      const key = favKeyOf(fav?.key || url);
+      if (openKeys.has(key)) continue;
+      const title = fav.title || domainOf(url) || url;
+      const s = direct
+        ? (urlMatchesDirectFilter(url, direct) ? 10 : 0)
+        : query
+          ? scoreFields(query, [{ text: title, weight: 1.0 }, { text: url, weight: 0.55 }])
+          : 1;
+      if ((query || direct) && s <= 0) continue;
+      items.push({ kind: 'favorite', section: 'favorite', score: s, fav, title, url });
+    }
+    if (query) items.sort((a, b) => b.score - a.score);
+    return items;
   }
 
   function buildBookmarkItems(q, openUrls = null, direct = null) {
@@ -472,10 +553,11 @@
     if (provider === 'bookmarks') return buildBookmarkItems(q, null, typeof parseDirectUrl === 'function' ? parseDirectUrl(query) : null);
     const directItem = buildDirectItem(direct);
     const { recentItems, tabItems, groupItems, cmdItems, openUrls } = buildNativeItems(q, direct, directItem?.matchedTab?.id ?? null);
+    const favItems = buildFavoriteItems(q, openUrls, direct);
     const bookmarkItems = buildBookmarkItems(q, openUrls, direct);
     const historyItems = buildHistoryItems(q, openUrls, direct);
-    // 严格按「网址直达(当输入为 URL) -> 最近打开 -> 标签页 -> 书签 -> 浏览历史 -> 分组 -> 命令 -> Google」层级输出
-    const out = directItem ? [directItem, ...recentItems, ...tabItems] : [...recentItems, ...tabItems];
+    // 严格按「网址直达(当输入为 URL) -> 最近打开 -> 标签页 -> 置顶收藏 -> 书签 -> 浏览历史 -> 分组 -> 命令 -> Google」层级输出
+    const out = directItem ? [directItem, ...recentItems, ...tabItems, ...favItems] : [...recentItems, ...tabItems, ...favItems];
     if (!query) return [...out, ...bookmarkItems, ...historyItems, ...groupItems, ...cmdItems];
     if (bookmarkItems.length) out.push(...bookmarkItems);
     if (historyItems.length) out.push(...historyItems);
@@ -487,6 +569,7 @@
   function itemKey(item) {
     if (!item) return '';
     if (item.kind === 'url') return 'url:' + item.url;
+    if (item.kind === 'favorite') return 'fav:' + favKeyOf(item.url);
     if (item.kind === 'tab') return 'tab:' + item.tab.id;
     if (item.kind === 'bookmark') return 'bookmark:' + item.bookmark.url;
     if (item.kind === 'history') return 'history:' + item.item.url;
@@ -578,7 +661,7 @@
     return out;
   }
 
-  const SECTION = { direct: '网址直达', recent: '最近打开', tab: '标签页', bookmark: '书签', history: '浏览历史', group: '分组', cmd: '命令', google: '网页搜索' };
+  const SECTION = { direct: '网址直达', recent: '最近打开', tab: '标签页', favorite: '置顶收藏', bookmark: '书签', history: '浏览历史', group: '分组', cmd: '命令', google: '网页搜索' };
   const SOURCE_LABEL = { all: '全部', tabs: '标签', bookmarks: '书签', history: '历史', google: 'Google' };
   const PREFIX_HINT = 'b 空格 书签 · h 空格 历史 · g 空格 Google';
   function render() {
@@ -588,6 +671,7 @@
     const placeholder = provider === 'all' ? trText('搜索标签、书签或浏览历史…') : provider === 'tabs' ? trText('搜索标签、分组或命令…') : provider === 'bookmarks' ? trText('搜索书签…') : provider === 'history' ? trText('搜索浏览历史…') : trText(`输入${SOURCE_LABEL[provider]}搜索词…`);
     const hintText = isEn ? 'b: Bookmarks · h: History · g: Google' : PREFIX_HINT;
     input.setAttribute('placeholder', isEn ? `${placeholder} (${hintText})` : `${placeholder}（${PREFIX_HINT}）`);
+    const favKeys = favoriteKeySet();
     list.innerHTML = '';
     let lastSection = null;
     view.forEach((it, i) => {
@@ -614,7 +698,9 @@
         ic = it.matchedTab ? 'arrowRight' : 'globe';
         if (it.matchedTab) {
           main = isEn ? `Switch to open tab: ${escapeHtml(it.title)}` : `切换到已打开网页：${escapeHtml(it.title)}`;
-          sub = escapeHtml(it.matchedTab.url || it.url);
+          const ago = typeof formatRelativeAccessTime === 'function' ? formatRelativeAccessTime(tabVisitTime(it.matchedTab), { lang: isEn ? 'en' : 'zh' }) : '';
+          const matchedUrl = escapeHtml(it.matchedTab.url || it.url);
+          sub = ago ? `${escapeHtml(ago)} · ${matchedUrl}` : matchedUrl;
           tag = it.group ? escapeHtml(it.group) : trText('已打开直达');
         } else {
           main = isEn ? `Open URL: ${escapeHtml(it.url)}` : `打开网址：${escapeHtml(it.url)}`;
@@ -627,7 +713,8 @@
         ic = 'signal';
         main = mark(it.title, q);
         const addr = escapeHtml(standalone ? it.tab.url : domainOf(it.tab.url));
-        sub = it.summary ? `${mark(it.summary, q)} · ${addr}` : addr;
+        const ago = typeof formatRelativeAccessTime === 'function' ? formatRelativeAccessTime(tabVisitTime(it.tab), { lang: isEn ? 'en' : 'zh' }) : '';
+        sub = [ago ? escapeHtml(ago) : '', it.summary ? mark(it.summary, q) : '', addr].filter(Boolean).join(' · ');
         tag = it.group ? escapeHtml(it.group) : trText('未分组');
         if (standalone) {
           const windows = [...new Set(data.tabs.filter(t => !t.url?.startsWith(chrome.runtime.getURL('search.html'))).map(t => t.windowId))];
@@ -639,6 +726,14 @@
           li.classList.add('is-discarded');
           tag = `${tag} · ${trText('已休眠')}`;
         }
+        if (favKeys.has(favKeyOf(it.tab.url))) {
+          tag = `${trText('置顶收藏')} · ${tag}`;
+        }
+      } else if (it.kind === 'favorite') {
+        ic = 'starFilled';
+        main = mark(it.title, q);
+        sub = escapeHtml(standalone ? it.url : domainOf(it.url));
+        tag = trText('未打开 · 点击重开');
       } else if (it.kind === 'group') {
         ic = 'chevron';
         main = mark(it.group.title || trText('未命名组'), q);
@@ -670,11 +765,31 @@
       }
       const glyph = it.kind === 'bookmark'
         ? BOOKMARK_TYPE_ICO
-        : standalone && (it.kind === 'tab' || it.kind === 'history')
-          ? `<img class="palette-favicon" src="${chrome.runtime.getURL('_favicon/')}?pageUrl=${encodeURIComponent(it.kind === 'tab' ? it.tab.url : it.item.url)}&size=32" alt="">`
+        : standalone && (it.kind === 'tab' || it.kind === 'history' || it.kind === 'favorite')
+          ? `<img class="palette-favicon" src="${chrome.runtime.getURL('_favicon/')}?pageUrl=${encodeURIComponent(it.kind === 'tab' ? it.tab.url : it.kind === 'favorite' ? it.url : it.item.url)}&size=32" alt="">`
           : icon(ic, 14);
       li.innerHTML = `<span class="palette-ico">${glyph}</span><span class="palette-main"><span class="palette-title">${main}</span><span class="palette-sub">${sub}</span></span><span class="palette-tag">${tag}</span>`;
       const copyUrl = itemUrl(it);
+      let favBtn = null;
+      if (copyUrl && /^https?:\/\//i.test(copyUrl) && typeof li.appendChild === 'function') {
+        const isFavItem = favKeys.has(favKeyOf(copyUrl));
+        favBtn = document.createElement('button');
+        favBtn.type = 'button';
+        favBtn.className = 'palette-fav' + (isFavItem ? ' is-fav' : '');
+        favBtn.tabIndex = -1;
+        favBtn.setAttribute('aria-label', `${trText(isFavItem ? '取消置顶收藏' : '加入置顶收藏')} ${copyUrl}`);
+        favBtn.setAttribute('aria-pressed', String(isFavItem));
+        favBtn.title = trText(isFavItem ? '取消置顶收藏' : '加入置顶收藏');
+        favBtn.innerHTML = icon(isFavItem ? 'starFilled' : 'star', 12);
+        favBtn.addEventListener('click', e => {
+          e.stopPropagation?.();
+          e.preventDefault?.();
+          selectionTouched = true;
+          if (sel !== i) { sel = i; paintSel(); }
+          toggleFavoriteInPalette(copyUrl, itemRawTitle(it) || copyUrl);
+        });
+        li.appendChild(favBtn);
+      }
       let copyBtn = null;
       if (copyUrl && typeof li.appendChild === 'function') {
         copyBtn = document.createElement('button');
@@ -693,10 +808,10 @@
         });
         li.appendChild(copyBtn);
       }
-      li.title = it.kind === 'url' ? (it.matchedTab ? `${it.title}\n${it.matchedTab.url}` : it.url) : it.kind === 'tab' ? `${it.title}\n${it.tab.url}` : it.kind === 'history' ? `${it.title}\n${it.item.url}` : it.kind === 'bookmark' ? `${it.title}\n${it.bookmark.url}` : '';
+      li.title = it.kind === 'url' ? (it.matchedTab ? `${it.title}\n${it.matchedTab.url}` : it.url) : it.kind === 'favorite' ? `${it.title}\n${it.url}` : it.kind === 'tab' ? `${it.title}\n${it.tab.url}` : it.kind === 'history' ? `${it.title}\n${it.item.url}` : it.kind === 'bookmark' ? `${it.title}\n${it.bookmark.url}` : '';
       li.querySelector('.palette-favicon')?.addEventListener('error', e => { e.currentTarget.hidden = true; });
       li.addEventListener('click', e => {
-        if (e.defaultPrevented || (copyBtn && (e.target === copyBtn || e.target?.closest?.('.palette-copy')))) return;
+        if (e.defaultPrevented || (favBtn && (e.target === favBtn || e.target?.closest?.('.palette-fav'))) || (copyBtn && (e.target === copyBtn || e.target?.closest?.('.palette-copy')))) return;
         run(i);
       });
       li.addEventListener('mousemove', () => { selectionTouched = true; if (sel !== i) { sel = i; paintSel(); } });
@@ -751,6 +866,12 @@
         tab = (await chrome.tabs.query({})).find(candidate => !isOwnSearch(candidate.url) && candidate.url === targetUrl);
         if (!current()) return;
       }
+      if (!tab && it.kind === 'favorite') {
+        const targetKey = favKeyOf(it.url);
+        if (!/^https?:\/\//i.test(it.url || '')) throw new Error('无效的收藏地址');
+        tab = (await chrome.tabs.query({})).find(candidate => !isOwnSearch(candidate.url) && favKeyOf(candidate.url) === targetKey);
+        if (!current()) return;
+      }
       let windowId;
       if (tab) {
         // Preserve native ordering: tab update -> owning window focus -> close(false).
@@ -765,7 +886,7 @@
         if (!standalone && !Number.isInteger(currentWindowId)) await windowReady;
         windowId = standalone ? sourceWindowId : currentWindowId;
         if (!Number.isInteger(windowId)) throw new Error('无法确定来源窗口，请重试');
-        const url = it.kind === 'url'
+        const url = it.kind === 'url' || it.kind === 'favorite'
           ? (/^https?:\/\//.test(it.url || '') ? it.url : null)
           : it.kind === 'bookmark'
             ? (String(it.bookmark?.url || '').match(/^https?:\/\/.*/) ? it.bookmark.url : null)
@@ -800,7 +921,7 @@
     const it = view[i];
     if (!open || !it || activating || composing || (embedded && !sourceReady)) return;
     selectionTouched = true;
-    if (it.kind === 'url' || it.kind === 'bookmark' || it.kind === 'history' || it.kind === 'google' || (standalone && it.kind === 'tab')) {
+    if (it.kind === 'url' || it.kind === 'favorite' || it.kind === 'bookmark' || it.kind === 'history' || it.kind === 'google' || (standalone && it.kind === 'tab')) {
       openDestination(it);
       return;
     }

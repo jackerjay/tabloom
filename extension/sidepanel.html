@@ -31,6 +31,9 @@
       <h1 class="t1">织页 TabLoom</h1>
       <span class="t2">开发者模式 · 实时分组与防重</span>
     </div>
+    <button id="locateActiveHeadBtn" class="icon-btn sm sp-tablist-section sp-locate-head" type="button" title="一键定位到当前激活标签" aria-label="一键定位到当前激活标签">
+      <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+    </button>
     <span id="health" class="pill"><span class="pulse"></span>检测中…</span>
   </header>
 
@@ -50,6 +53,10 @@
 
     <div class="tl-toolbar">
       <button id="regroup" class="btn primary tl-organize" type="button">立即整理</button>
+      <button id="locateCurrentTab" class="btn sp-locate-btn" type="button" title="一键定位并滚动到当前激活标签" aria-label="一键定位到当前激活标签">
+        <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+        <span>定位当前</span>
+      </button>
       <button id="dedup" class="btn dedup-btn" type="button" title="关闭重复标签，保留活跃/最左一个">
         <span>去重</span>
         <span id="dupCount" class="badge zero">0</span>
@@ -62,6 +69,8 @@
       <button id="collapseAll" class="icon-btn sm" type="button" title="全部折叠" aria-label="全部折叠"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2.5"/><path d="M5 8h6"/></svg></button>
       <button id="expandAll" class="icon-btn sm" type="button" title="全部展开" aria-label="全部展开"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2.5"/><path d="M5 8h6M8 5v6"/></svg></button>
     </div>
+
+    <div id="spFavoritesBar" class="sp-fav-bar hidden" aria-label="置顶收藏"></div>
   </div>
 
   <!-- ===== 设置模式主面板（在主页常驻展开；在普通网页可通过折叠条收起） ===== -->
@@ -113,17 +122,52 @@
       <div class="set-group">
         <div class="set-label">
           <span>防止重复标签与去重白名单</span>
+          <button id="spWhitelistSuggestBtn" class="mini-btn" type="button" title="由 AI Agent 分析当前多开页面与拦截记录，推荐路径级防重白名单">AI 建议</button>
         </div>
         <div class="set-row">
           <span class="rl">新开重复标签时实时拦截并跳转<small>打开已存在的 URL（忽略锚点）时，立即关闭新标签并激活跳转到已有标签页</small></span>
           <label class="switch"><input id="interceptDuplicates" type="checkbox" checked aria-label="新开重复标签实时拦截"><span class="track"></span></label>
         </div>
-        <p class="set-note" style="margin:6px 0">去重白名单（以下域名允许同时多开，不触发实时拦截）：</p>
+        <p class="set-note" style="margin:6px 0">去重白名单（支持域名、通配 https://host/path/* 或正则 /.../，匹配页可多开）：</p>
         <div id="spWhitelistList" class="wl-list"></div>
         <div class="wl-add">
-          <input id="spWhitelistInput" type="text" placeholder="添加允许重复打开的域名，如 github.com" aria-label="添加去重白名单域名">
+          <input id="spWhitelistInput" type="text" placeholder="域名、路径通配 */path/* 或 /正则/" aria-label="添加去重白名单规则">
+          <button id="spWhitelistTestBtn" class="mini-btn" type="button" title="对照当前已打开的页面测试匹配情况">测试</button>
           <button id="spWhitelistAddBtn" class="mini-btn" type="button">添加</button>
         </div>
+        <div id="spWhitelistTestResult" class="wl-test-result hidden" role="status" aria-live="polite"></div>
+        <div id="spWhitelistSuggestResult" class="wl-test-result hidden" role="status" aria-live="polite"></div>
+      </div>
+
+      <!-- 3.5 标签聚合标识层级规则 -->
+      <div class="set-group">
+        <div class="set-label">
+          <span>标签聚合标识层级（Path + 参数）</span>
+          <button id="spAggRuleSuggestBtn" class="mini-btn" type="button" title="分析当前页面内容与 URL 参数，推荐聚合标识层级规则">AI 建议</button>
+        </div>
+        <p class="set-note" style="margin:2px 0 6px">即使 path 相同，也可按查询参数（如 workspaceId,region）区分不同流水线或空间。</p>
+        <div id="spAggRuleList" class="wl-list"></div>
+        <div class="agg-rule-builder">
+          <div class="agg-rule-row">
+            <input id="spAggRulePattern" type="text" placeholder="网址/通配 https://console.example.com/deploy/*" aria-label="聚合规则网址或路径匹配">
+            <select id="spAggRuleDepth" class="agg-depth-sel" aria-label="Path 聚合层级深度">
+              <option value="auto">Path 自动</option>
+              <option value="1">1 级</option>
+              <option value="2">2 级</option>
+              <option value="3">3 级</option>
+              <option value="4">4 级</option>
+              <option value="5">5 级</option>
+              <option value="0">仅域名</option>
+            </select>
+          </div>
+          <div class="agg-rule-row">
+            <input id="spAggRuleQueryKeys" type="text" placeholder="区分参数如 workspaceId,region" aria-label="区分查询参数">
+            <button id="spAggRuleTestBtn" class="mini-btn" type="button" title="对照当前已打开的页面测试标识拆分结果">测试</button>
+            <button id="spAggRuleAddBtn" class="mini-btn" type="button">添加</button>
+          </div>
+        </div>
+        <div id="spAggRuleTestResult" class="wl-test-result hidden" role="status" aria-live="polite"></div>
+        <div id="spAggRuleSuggestResult" class="wl-test-result hidden" role="status" aria-live="polite"></div>
       </div>
 
       <!-- 4. 搜索与常规页面入口 -->

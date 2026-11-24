@@ -352,8 +352,44 @@ test('cleanup total can exceed returned candidates and unknown timestamps never 
   assert.equal(f.nodes.refreshCleanup.disabled, false);
 });
 
+test('locateCurrentTab clears filter, expands collapsed active group, scrolls row into center and flashes', async () => {
+  const f = await harness();
+  // Filter out the active tab (id 2, Beta) and collapse all groups in UI
+  f.nodes.search.value = 'Alpha';
+  f.nodes.search.oninput();
+  assert.equal(f.document.querySelector('li[data-tab-id="2"]'), null);
+
+  await f.nodes.collapseAll.onclick();
+  await settle();
+  f.state.groups[1].collapsed = true;
+  await f.refresh();
+
+  const res = await f.nodes.locateCurrentTab.onclick();
+  assert.equal(res, true);
+  assert.equal(f.nodes.search.value, '');
+  assert.equal(f.evaluate('searchTerm'), '');
+  const activeRow = f.document.querySelector('li[data-tab-id="2"]');
+  assert(activeRow, 'active tab row must be visible after locateCurrentTab');
+  assert(activeRow.scrolls.length >= 1, 'locateCurrentTab must scroll active row into view');
+  assert.equal(activeRow.scrolls.at(-1).block, 'center');
+  assert(activeRow.classList.contains('sp-locate-flash'));
+
+  // Sticky header locate button should trigger the same behavior
+  activeRow.scrolls.length = 0;
+  const res2 = await f.nodes.locateActiveHeadBtn.onclick();
+  assert.equal(res2, true);
+  assert.equal(f.document.querySelector('li[data-tab-id="2"]').scrolls.at(-1).block, 'center');
+
+  // When only shell tabs remain, locating reports an honest info toast without erroring
+  f.state.tabs = [{ id: 99, windowId: 7, groupId: -1, active: true, title: 'New tab', url: 'chrome://newtab/' }];
+  await f.refresh();
+  const resEmpty = await f.nodes.locateCurrentTab.onclick();
+  assert.equal(resEmpty, false);
+  assert.match(f.calls.toast.at(-1)[0], /暂无可定位的活动标签/);
+});
+
 test('new tools keep all prior control ids, isolate styles, and preserve main-search delegation', () => {
-  for (const id of ['model', 'regroup', 'dedup', 'dedupUndo', 'search', 'collapseAll', 'expandAll', 'autoOrganize', 'autoDelay', 'openGlobalSearch', 'searchShortcutSettings', 'deckToggle']) assert(html.includes(`id="${id}"`));
+  for (const id of ['model', 'regroup', 'locateCurrentTab', 'locateActiveHeadBtn', 'dedup', 'dedupUndo', 'search', 'collapseAll', 'expandAll', 'autoOrganize', 'autoDelay', 'openGlobalSearch', 'searchShortcutSettings', 'deckToggle']) assert(html.includes(`id="${id}"`));
   assert(html.includes('href="sidepanel.css"'));
   assert(html.includes('id="closedGroups"')); assert(html.includes('id="cleanupAdvice"'));
   assert.match(source, /tt-open-main-search/);

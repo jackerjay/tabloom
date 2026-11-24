@@ -87,6 +87,8 @@
             </div>
             <div class="quick-hint">
               <span id="searchPrefixHint">句首 <kbd>b</kbd> 书签 · <kbd>h</kbd> 历史 · <kbd>g</kbd> Google · <kbd>/</kbd> 标签</span>
+              <span>·</span>
+              <span id="searchCounter" class="search-counter">0 / 30</span>
             </div>
           </div>
         </form>
@@ -146,6 +148,9 @@
             <button id="expandAll" class="btn hidden" type="button">展开全部</button>
           </div>
         </div>
+
+        <!-- 置顶收藏快捷切换栏（有收藏项时自动显示，点击即切换或重开） -->
+        <section id="favoritesBar" class="favorites-bar hidden" aria-label="置顶收藏"></section>
 
         <!-- 整理进行中状态横幅 -->
         <div id="organizeBanner" class="batch-bar hidden" role="status">
@@ -299,15 +304,53 @@
         </section>
 
         <section class="set-group">
-          <div class="set-label">防止重复标签与去重白名单</div>
+          <div class="set-label">
+            <span>防止重复标签与去重白名单</span>
+            <button id="whitelistSuggestBtn" class="mini-btn" type="button" title="由 AI Agent 分析当前多开页面与拦截记录，推荐路径级防重白名单">AI 建议</button>
+          </div>
           <div class="set-row">
             <span class="rl">新开重复标签时实时拦截并跳转<small>打开已存在的 URL 时自动切回已有标签页并关闭重复新页</small></span>
             <label class="switch"><input id="interceptDuplicates" type="checkbox" checked /><span class="track"></span></label>
           </div>
+          <p class="set-note" style="margin:6px 0 4px">去重白名单（支持域名、通配 https://host/path/* 或正则 /.../）：</p>
+          <div id="settingsWlList" class="wl-list" style="margin-bottom:6px"></div>
           <div class="wl-add" style="margin-top:6px">
-            <input id="whitelistInput" type="text" placeholder="添加允许双开的域名，如 localhost:3000" />
+            <input id="whitelistInput" type="text" placeholder="域名、路径通配 */path/* 或 /正则/" aria-label="添加去重白名单规则" />
+            <button id="whitelistTest" class="mini-btn" type="button" title="对照当前已打开的页面测试匹配情况">测试</button>
             <button id="whitelistAdd" class="mini-btn" type="button">添加</button>
           </div>
+          <div id="whitelistTestResult" class="wl-test-result hidden" role="status" aria-live="polite"></div>
+          <div id="whitelistSuggestResult" class="wl-test-result hidden" role="status" aria-live="polite"></div>
+        </section>
+
+        <section class="set-group">
+          <div class="set-label">
+            <span>标签聚合标识层级（Path + 查询参数区分）</span>
+            <button id="aggRuleSuggestBtn" class="mini-btn" type="button" title="分析当前页面内容与 URL 参数，推荐聚合标识层级规则">AI 建议</button>
+          </div>
+          <p class="set-note" style="margin:2px 0 6px">为同路径但靠参数区分流水线/空间的页面指定 Path 深度与区分参数（逗号分隔，如 workspaceId,region）。</p>
+          <div id="settingsAggRuleList" class="wl-list" style="margin-bottom:6px"></div>
+          <div class="agg-rule-builder">
+            <div class="agg-rule-row">
+              <input id="aggRulePattern" type="text" placeholder="规则如 https://console.example.com/deploy/*" aria-label="聚合规则网址或路径匹配" />
+              <select id="aggRuleDepth" class="agg-depth-sel" aria-label="Path 聚合层级深度">
+                <option value="auto">Path 自动</option>
+                <option value="1">1 级</option>
+                <option value="2">2 级</option>
+                <option value="3">3 级</option>
+                <option value="4">4 级</option>
+                <option value="5">5 级</option>
+                <option value="0">仅域名</option>
+              </select>
+            </div>
+            <div class="agg-rule-row">
+              <input id="aggRuleQueryKeys" type="text" placeholder="区分参数如 workspaceId,region" aria-label="区分不同流水线或空间的查询参数" />
+              <button id="aggRuleTest" class="mini-btn" type="button" title="对照当前已打开的页面预览聚合标识层级">测试</button>
+              <button id="aggRuleAdd" class="mini-btn" type="button">添加</button>
+            </div>
+          </div>
+          <div id="aggRuleTestResult" class="wl-test-result hidden" role="status" aria-live="polite"></div>
+          <div id="aggRuleSuggestResult" class="wl-test-result hidden" role="status" aria-live="polite"></div>
         </section>
 
         <section class="set-group">

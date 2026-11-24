@@ -9,6 +9,7 @@ const DEFAULTS = {
   includePinned: false,
   density: 'comfortable',
   dedupWhitelist: [],
+  aggregationRules: [],
   interceptDuplicates: true,
   interceptScope: 'all',
   showPageSearchPill: true,
@@ -20,6 +21,9 @@ const AUTO_ALARM = 'ai-tab-auto-organize';
 const DISCARD_ALARM = 'ai-tab-auto-discard';
 const LOCKED_GROUPS_KEY = 'lockedGroupIds';
 const MANUAL_NAMED_GROUPS_KEY = 'manualNamedGroups';
+const MANUAL_TAB_TITLES_KEY = 'manualTabTitles';
+const PINNED_FAVORITES_KEY = 'pinnedFavorites';
+const MAX_PINNED_FAVORITES = 50;
 
 async function readLockedGroupIds() {
   try {
@@ -30,10 +34,190 @@ async function readLockedGroupIds() {
   }
 }
 
+async function readManualTabTitles() {
+  try {
+    const raw = (await chrome.storage?.local?.get?.(MANUAL_TAB_TITLES_KEY))?.[MANUAL_TAB_TITLES_KEY];
+    const out = {};
+    if (raw && typeof raw === 'object') {
+      for (const [k, v] of Object.entries(raw)) {
+        const id = Number(k);
+        const title = String(v?.title || '').trim();
+        if (Number.isInteger(id) && id >= 0 && title) {
+          out[id] = { title, url: String(v?.url || ''), at: Number(v?.at) || 0 };
+        }
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+async function writeManualTabTitles(map) {
+  await chrome.storage?.local?.set?.({ [MANUAL_TAB_TITLES_KEY]: map || {} });
+  return map || {};
+}
+
+function writeManualTabTitleInPage(rawTitle) {
+  const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
+  const cut = (s, n) => Array.from(s).slice(0, n).join('');
+  const title = cut(clean(String(rawTitle || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, '')), 80);
+  if (!title) return { status: 'skipped' };
+  const key = '__aiTabTitleState';
+  const prev = document[key];
+  if (prev?.observer) {
+    prev.observer.disconnect();
+    prev.observer = null;
+  }
+  const originalTitle = prev && document.title === prev.aiTitle ? prev.originalTitle : document.title;
+  const state = {
+    originalTitle: clean(originalTitle),
+    aiTitle: title,
+    url: location.href,
+    snippet: prev?.snippet || '',
+    observer: null,
+    active: true,
+    rewriteWindow: Date.now(),
+    rewrites: 0,
+  };
+  document[key] = state;
+  document.title = title;
+  if (typeof MutationObserver === 'function' && document.head) {
+    state.observer = new MutationObserver(() => {
+      if (!state.active) return;
+      if (state.url !== location.href) { state.observer?.disconnect(); state.active = false; return; }
+      if (document.title !== state.aiTitle) document.title = state.aiTitle;
+    });
+    const titleEl = document.querySelector('head > title');
+    if (titleEl) state.observer.observe(titleEl, { childList: true, characterData: true, subtree: true });
+    state.observer.observe(document.head, { childList: true });
+  }
+  return { status: 'updated', title };
+}
+
+async function renameTab({ tabId, title } = {}) {
+  const id = Number(tabId);
+  if (!Number.isInteger(id) || id < 0) return { ok: false, message: '无效标签页 ID' };
+  const clean = Array.from(String(title || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').replace(/\s+/g, ' ').trim()).slice(0, 80).join('');
+  if (!clean) return { ok: false, message: '标签名称不能为空' };
+
+  let tab;
+  try { tab = await chrome.tabs.get(id); } catch { tab = null; }
+  if (!tab) return { ok: false, message: '标签页不存在或已关闭' };
+
+  const liveUrl = normalizeUrl(tab.url || tab.pendingUrl || '');
+  const manual = await readManualTabTitles();
+  manual[id] = { title: clean, url: liveUrl, at: Date.now() };
+  await writeManualTabTitles(manual);
+
+  if (/^https?:\/\//i.test(tab.url || '') && !tab.discarded && typeof chrome.scripting?.executeScript === 'function') {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: id }, func: writeManualTabTitleInPage, args: [clean] });
+    } catch { /* Restricted or transitioning page; local display title still applies. */ }
+  }
+  return { ok: true, tabId: id, title: clean, url: liveUrl };
+}
+
+async function pruneManualTabTitle(tabId, currentUrl = null) {
+  const id = Number(tabId);
+  if (!Number.isInteger(id) || id < 0) return;
+  const manual = await readManualTabTitles();
+  const existing = manual[id];
+  if (!existing) return;
+  if (currentUrl !== null && existing.url && normalizeUrl(currentUrl) === existing.url) return;
+  delete manual[id];
+  await writeManualTabTitles(manual);
+}
+
 async function writeLockedGroupIds(set) {
   const list = [...set].filter(id => Number.isInteger(id) && id >= 0).sort((a, b) => a - b);
   await chrome.storage?.local?.set?.({ [LOCKED_GROUPS_KEY]: list });
   return list;
+}
+
+async function readPinnedFavorites() {
+  try {
+    const raw = (await chrome.storage?.local?.get?.(PINNED_FAVORITES_KEY))?.[PINNED_FAVORITES_KEY];
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const item of raw) {
+      const rawUrl = String(item?.url || '').trim();
+      if (!/^https?:\/\//i.test(rawUrl)) continue;
+      const key = normalizeUrl(item?.key || rawUrl);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        key,
+        url: rawUrl,
+        title: String(item?.title || rawUrl).slice(0, 140),
+        addedAt: Number(item?.addedAt) || 0,
+      });
+    }
+    return out.slice(0, MAX_PINNED_FAVORITES);
+  } catch {
+    return [];
+  }
+}
+
+async function writePinnedFavorites(list) {
+  const next = (Array.isArray(list) ? list : []).slice(0, MAX_PINNED_FAVORITES);
+  await chrome.storage?.local?.set?.({ [PINNED_FAVORITES_KEY]: next });
+  return next;
+}
+
+async function togglePinnedFavorite({ url = '', title = '', pinned = null } = {}) {
+  const rawUrl = String(url || '').trim();
+  if (!/^https?:\/\//i.test(rawUrl)) return { ok: false, message: '仅支持收藏 http/https 网页链接' };
+  const key = normalizeUrl(rawUrl);
+  const current = await readPinnedFavorites();
+  const idx = current.findIndex(item => item.key === key);
+  const shouldPin = typeof pinned === 'boolean' ? pinned : idx === -1;
+
+  if (!shouldPin) {
+    const next = idx === -1 ? current : [...current.slice(0, idx), ...current.slice(idx + 1)];
+    if (idx !== -1) await writePinnedFavorites(next);
+    return { ok: true, pinned: false, key, favorites: next };
+  }
+
+  const cleanLabel = String(title || rawUrl).trim().slice(0, 140) || rawUrl;
+  const entry = {
+    key,
+    url: rawUrl,
+    title: cleanLabel,
+    addedAt: idx >= 0 ? current[idx].addedAt : Date.now(),
+  };
+  const next = idx >= 0
+    ? current.map((item, i) => (i === idx ? entry : item))
+    : [...current, entry].slice(-MAX_PINNED_FAVORITES);
+  await writePinnedFavorites(next);
+  return { ok: true, pinned: true, key, entry, favorites: next };
+}
+
+async function openPinnedFavorite({ url = '', key = '', windowId = null } = {}) {
+  const rawUrl = String(url || '').trim();
+  const targetKey = normalizeUrl(key || rawUrl);
+  if (!/^https?:\/\//i.test(rawUrl || targetKey)) return { ok: false, message: '无效收藏网址' };
+
+  const allTabs = await chrome.tabs.query({});
+  const matches = allTabs.filter(t => /^https?:\/\//i.test(t.url || '') && normalizeUrl(t.url) === targetKey);
+  const existing = (Number.isInteger(windowId) ? matches.find(t => t.windowId === windowId) : null) || matches[0];
+  if (existing) {
+    try { await chrome.tabs.update(existing.id, { active: true }); } catch { /* ignore */ }
+    if (existing.windowId != null) {
+      try { await chrome.windows?.update?.(existing.windowId, { focused: true }); } catch { /* ignore */ }
+    }
+    return { ok: true, action: 'switched', tabId: existing.id, windowId: existing.windowId };
+  }
+
+  const targetWinId = Number.isInteger(windowId) ? windowId : await currentWindowId();
+  const createProps = { url: rawUrl || targetKey, active: true };
+  if (Number.isInteger(targetWinId)) createProps.windowId = targetWinId;
+  const created = await chrome.tabs.create(createProps);
+  if (created?.windowId != null) {
+    try { await chrome.windows?.update?.(created.windowId, { focused: true }); } catch { /* ignore */ }
+  }
+  return { ok: true, action: 'opened', tabId: created?.id ?? null, windowId: created?.windowId ?? targetWinId };
 }
 
 async function readManualNamedGroups() {
@@ -332,6 +516,15 @@ function buildSnippetSummary(d) {
   return cleaned ? Array.from(cleaned).slice(0, 72).join('') : '';
 }
 
+function buildSnippetExcerpt(d) {
+  if (!d || typeof d !== 'object') return '';
+  const raw = d.snippet
+    ? String(d.snippet)
+    : [d.site, d.desc, d.heads, d.text].filter(Boolean).join(' · ');
+  const cleaned = raw.replace(/\s+/g, ' ').trim();
+  return cleaned ? Array.from(cleaned).slice(0, 360).join('') : '';
+}
+
 async function updateTabMetaCache(updates = []) {
   if (!updates.length || typeof chrome.storage?.local?.get !== 'function') return;
   try {
@@ -352,9 +545,12 @@ async function updateTabMetaCache(updates = []) {
       if (item.summary && (item.source === 'ai' || prev.source !== 'ai' || !prev.summary)) {
         next.summary = String(item.summary).trim();
       }
-      if (!next.title && !next.summary) continue;
+      if (item.excerpt && (!prev.excerpt || item.excerpt.length >= prev.excerpt.length)) {
+        next.excerpt = String(item.excerpt).trim();
+      }
+      if (!next.title && !next.summary && !next.excerpt) continue;
       next.updatedAt = now;
-      if (next.title !== prev.title || next.summary !== prev.summary || next.source !== prev.source) {
+      if (next.title !== prev.title || next.summary !== prev.summary || next.excerpt !== prev.excerpt || next.source !== prev.source) {
         cache[key] = next;
         changed = true;
       }
@@ -393,7 +589,39 @@ function normalizeGroupKey(name) {
   return String(name || '').trim().toLowerCase().replace(/[\s·•・\-_—–/|&和与及、,:：]+/g, '');
 }
 
-async function collectContext(target, all, { existing = [], manualNamed = new Map(), locked = new Set() } = {}) {
+function isGenericDomainGroup(name) {
+  const s = String(name || '').trim().toLowerCase();
+  if (!s) return true;
+  if (['其他', '其它', '杂项', '未分类', '未命名', 'other', 'misc', 'ungrouped', '云文档', 'docs', 'wiki'].includes(s)) return true;
+  return /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/i.test(s);
+}
+
+function extractTabUrlPrefix(rawUrl) {
+  if (!/^https?:\/\//i.test(String(rawUrl || ''))) return { host: '', urlPrefix: '', path: '' };
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+    const isIdSeg = seg => /^\d+$/.test(seg) || /^[0-9a-f-]{12,}$/i.test(seg);
+    const segs = u.pathname.split('/').filter(Boolean).map(s => (isIdSeg(s) ? '*' : s));
+    let pick = [];
+    if (segs.length >= 2 && (host === 'github.com' || host.includes('gitlab'))) pick = segs.slice(0, 2);
+    else {
+      for (const s of segs) {
+        if (s === '*' || pick.length >= 2) break;
+        pick.push(s);
+      }
+    }
+    return {
+      host,
+      urlPrefix: pick.length ? `${host}/${pick.join('/')}` : host,
+      path: u.pathname,
+    };
+  } catch {
+    return { host: '', urlPrefix: '', path: '' };
+  }
+}
+
+async function collectContext(target, all, { existing = [], manualNamed = new Map(), locked = new Set(), aggregationRules = [] } = {}) {
   const bookmarkOf = new Map();
   const folders = [];
   try {
@@ -415,14 +643,16 @@ async function collectContext(target, all, { existing = [], manualNamed = new Ma
     const raw = (await chrome.storage?.local?.get?.(TAB_META_KEY))?.[TAB_META_KEY];
     if (raw && typeof raw === 'object') tabMetaMap = raw;
   } catch { /* ignore */ }
+  const manualTitles = typeof readManualTabTitles === 'function' ? await readManualTabTitles().catch(() => ({})) : {};
+  const recentVisits = await loadRecentVisits().catch(() => ({}));
 
   const active = all.find(t => t.active) || null;
   const activeHttp = active && /^https?:\/\//.test(active.url || '') ? active : null;
   // The actual active webpage may be pinned/already grouped and absent from target.
   // Never substitute a guessed previous page when the workbench itself is active.
   const httpTabs = [
-    ...(activeHttp ? [activeHttp] : []),
-    ...target.filter(t => t.id !== activeHttp?.id && /^https?:\/\//.test(t.url || '')),
+    ...(activeHttp && !activeHttp.discarded ? [activeHttp] : []),
+    ...target.filter(t => t.id !== activeHttp?.id && !t.discarded && /^https?:\/\//.test(t.url || '')),
   ];
   const snippets = new Map();
   const deadline = Date.now() + EXTRACT_BUDGET_MS;
@@ -436,37 +666,143 @@ async function collectContext(target, all, { existing = [], manualNamed = new Ma
   };
   await Promise.all(Array.from({ length: Math.min(EXTRACT_CONCURRENCY, httpTabs.length) }, worker));
 
+  const compiledAggRules = compileAggregationRules(aggregationRules);
   const enriched = target.map(t => {
     const liveSnippet = snippetText(snippets.get(t.id)) || null;
     const cachedMeta = !liveSnippet ? tabMetaMap[normalizeUrl(t.url)] : null;
+    const manual = manualTitles[t.id];
+    const manualTitle = manual?.title && (!manual.url || manual.url === normalizeUrl(t.url || '')) ? manual.title : null;
+    const { host, urlPrefix } = extractTabUrlPrefix(t.url);
+    const cachedHint = cachedMeta?.excerpt || cachedMeta?.summary || '';
+    const aggIdn = compiledAggRules.length ? resolveUrlAggregationIdentity(t.url, compiledAggRules) : null;
     return {
-      id: t.id, title: cachedMeta?.title || snippets.get(t.id)?.originalTitle || t.title, url: t.url,
+      id: t.id,
+      title: manualTitle || cachedMeta?.title || snippets.get(t.id)?.originalTitle || t.title,
+      url: t.url,
+      ...(urlPrefix && urlPrefix !== host ? { urlPrefix } : {}),
+      ...(aggIdn?.matched ? { aggregationKey: aggIdn.aggregationKey, ...(aggIdn.paramSummary ? { identityParams: aggIdn.paramSummary } : {}) } : {}),
+      ...(t.discarded ? { discarded: true } : {}),
       bookmarkPath: bookmarkOf.get(normalizeUrl(t.url)) || null,
       snippet: liveSnippet,
-      ...(!liveSnippet && cachedMeta?.summary ? { cachedSummary: String(cachedMeta.summary).slice(0, 160) } : {}),
+      ...(!liveSnippet && cachedHint ? { cachedSummary: String(cachedHint).slice(0, 240) } : {}),
     };
   });
-  const safeHost = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+
   const existingGroupAnchors = [...(existing || [])]
     .filter(g => typeof g?.title === 'string' && g.title.trim())
     .map(g => {
       const pinned = manualNamed.has(g.id) || locked.has(g.id);
-      const samples = all
-        .filter(t => t.groupId === g.id && /^https?:\/\//.test(t.url || ''))
-        .slice(0, 6)
+      const members = all.filter(t => t.groupId === g.id && /^https?:\/\//.test(t.url || ''));
+      const prefixCounts = new Map();
+      const aggKeyCounts = new Map();
+      const hostCounts = new Map();
+      const kwCounts = new Map();
+      const addKw = w => {
+        const clean = String(w || '').trim();
+        if (clean.length < 2) return;
+        const k = clean.toLowerCase();
+        kwCounts.set(k, { label: clean, count: (kwCounts.get(k)?.count || 0) + 1 });
+      };
+      for (const m of members) {
+        const { host, urlPrefix } = extractTabUrlPrefix(m.url);
+        if (host) hostCounts.set(host, (hostCounts.get(host) || 0) + 1);
+        if (urlPrefix) prefixCounts.set(urlPrefix, (prefixCounts.get(urlPrefix) || 0) + 1);
+        if (compiledAggRules.length) {
+          const idn = resolveUrlAggregationIdentity(m.url, compiledAggRules);
+          if (idn.matched && idn.aggregationKey) {
+            aggKeyCounts.set(idn.aggregationKey, (aggKeyCounts.get(idn.aggregationKey) || 0) + 1);
+          }
+        }
+        const text = `${m.title || ''} ${tabMetaMap[normalizeUrl(m.url)]?.summary || ''}`;
+        for (const ns of text.match(/\b[a-z][a-z0-9_]{1,18}\.[a-z][a-z0-9_]{1,22}\b/gi) || []) {
+          if (!/\.(com|net|org|cn|io|dev)$/i.test(ns)) addKw(ns);
+        }
+        for (const acr of text.match(/\b[A-Z][A-Z0-9_-]{1,12}\b/g) || []) addKw(acr);
+        for (const zh of String(m.title || '').match(/[\p{Script=Han}]{2,6}/gu) || []) addKw(zh);
+      }
+      const topAggregationKeys = [...aggKeyCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([key, count]) => ({ key, count }));
+      const topPrefixes = [...prefixCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([prefix, count]) => ({ prefix, count }));
+      const topHosts = [...hostCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([host, count]) => ({ host, count }));
+      const keywords = [...kwCounts.values()].sort((a, b) => b.count - a.count).slice(0, 5).map(x => x.label);
+      const seenU = new Set();
+      const samples = members
+        .filter(t => {
+          const nu = normalizeUrl(t.url);
+          if (seenU.has(nu)) return false;
+          seenU.add(nu);
+          return true;
+        })
+        .slice(0, 8)
         .map(t => {
           const meta = tabMetaMap[normalizeUrl(t.url)];
           const s = snippetText(snippets.get(t.id));
+          const { host, urlPrefix, path } = extractTabUrlPrefix(t.url);
+          const idn = compiledAggRules.length ? resolveUrlAggregationIdentity(t.url, compiledAggRules) : null;
           return {
-            title: String(meta?.title || t.title || '').replace(/\s+/g, ' ').trim().slice(0, 60),
-            host: safeHost(t.url),
-            ...(meta?.summary || s ? { summary: String(meta?.summary || s).replace(/\s+/g, ' ').trim().slice(0, 72) } : {}),
+            id: t.id,
+            title: String(meta?.title || t.title || '').replace(/\s+/g, ' ').trim().slice(0, 64),
+            host,
+            urlPrefix,
+            ...(idn?.matched ? { aggregationKey: idn.aggregationKey } : {}),
+            path: String(path || '').slice(0, 80),
+            ...(meta?.excerpt || meta?.summary || s ? { summary: String(meta?.excerpt || meta?.summary || s).replace(/\s+/g, ' ').trim().slice(0, 88) } : {}),
           };
         });
-      return { name: g.title.trim(), pinned, samples };
+      const descParts = [`共 ${members.length} 页`];
+      if (topAggregationKeys.length) descParts.push(`标识层级：${topAggregationKeys.slice(0, 2).map(k => `${k.key}(${k.count})`).join('、')}`);
+      else if (topPrefixes.length) descParts.push(`主前缀：${topPrefixes.slice(0, 3).map(p => `${p.prefix}(${p.count})`).join('、')}`);
+      if (keywords.length) descParts.push(`关键词：${keywords.join(' / ')}`);
+      return {
+        name: g.title.trim(),
+        pinned,
+        genericDomain: isGenericDomainGroup(g.title),
+        tabCount: members.length,
+        ...(topAggregationKeys.length ? { topAggregationKeys } : {}),
+        topPrefixes,
+        topHosts,
+        keywords,
+        description: descParts.join('；'),
+        samples,
+      };
     })
-    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.samples.length - a.samples.length)
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.tabCount - a.tabCount)
     .slice(0, 24);
+
+  const groupNameById = new Map((existing || []).map(g => [g.id, g.title || '']));
+  const snapshotTabs = all
+    .filter(t => /^https?:\/\//i.test(t.url || ''))
+    .map(t => {
+      const live = snippetText(snippets.get(t.id)) || null;
+      const meta = tabMetaMap[normalizeUrl(t.url)];
+      const manual = manualTitles[t.id];
+      const manualTitle = manual?.title && (!manual.url || manual.url === normalizeUrl(t.url || '')) ? manual.title : null;
+      const idn = compiledAggRules.length ? resolveUrlAggregationIdentity(t.url, compiledAggRules) : null;
+      return {
+        id: t.id,
+        title: t.title,
+        ...(manualTitle ? { manualTitle } : {}),
+        ...(snippets.get(t.id)?.originalTitle ? { originalTitle: snippets.get(t.id).originalTitle } : {}),
+        url: t.url,
+        ...(idn?.matched ? { aggregationKey: idn.aggregationKey, ...(idn.paramSummary ? { identityParams: idn.paramSummary } : {}) } : {}),
+        groupId: t.groupId ?? -1,
+        groupName: t.groupId != null && t.groupId !== -1 ? (groupNameById.get(t.groupId) || '') : '',
+        pinned: Boolean(t.pinned),
+        active: Boolean(t.active),
+        discarded: Boolean(t.discarded),
+        bookmarkPath: bookmarkOf.get(normalizeUrl(t.url)) || null,
+        recentVisitAt: recentVisits[t.id] || t.lastAccessed || null,
+        snippet: live,
+        ...(meta?.excerpt || meta?.summary ? { cachedSummary: String(meta.excerpt || meta.summary).slice(0, 360) } : {}),
+      };
+    });
+  const snapshotGroups = (existing || []).map(g => ({
+    id: g.id,
+    name: g.title || '',
+    color: g.color,
+    pinned: manualNamed.has(g.id) || locked.has(g.id),
+    tabIds: all.filter(t => t.groupId === g.id && /^https?:\/\//i.test(t.url || '')).map(t => t.id),
+  }));
+
   const activePageStatus = activeHttp ? 'active-webpage'
     : active ? 'non-http-active-previous-page-unknown' : 'no-active-tab';
   const context = {
@@ -480,11 +816,14 @@ async function collectContext(target, all, { existing = [], manualNamed = new Ma
     bookmarkFolders: folders.slice(0, 40),
     bookmarkCount: bookmarkOf.size,
     ...(existingGroupAnchors.length ? { existingGroupAnchors } : {}),
+    ...(aggregationRules?.length ? { aggregationRules } : {}),
   };
   const metaUpdates = [];
   for (const t of httpTabs) {
-    const s = buildSnippetSummary(snippets.get(t.id));
-    if (s) metaUpdates.push({ url: t.url, summary: s, source: 'snippet' });
+    const d = snippets.get(t.id);
+    const s = buildSnippetSummary(d);
+    const ex = buildSnippetExcerpt(d);
+    if (s || ex) metaUpdates.push({ url: t.url, summary: s, excerpt: ex, source: 'snippet' });
   }
   if (metaUpdates.length) await updateTabMetaCache(metaUpdates);
   await chrome.storage.session.set({
@@ -496,7 +835,7 @@ async function collectContext(target, all, { existing = [], manualNamed = new Ma
       activePageStatus, focusedUrl: active?.url || null,
     },
   });
-  return { enriched, context };
+  return { enriched, context, snapshotTabs, snapshotGroups };
 }
 
 /** Incremental analysis includes dirty navigations, even in existing groups. */
@@ -505,22 +844,40 @@ async function organize({ apply = false, incremental = false, windowId = null, a
   if (automatic && !settings.autoOrganize) return { ok: true, cancelled: true, applied: false };
   windowId = windowId ?? await currentWindowId();
   await autoReady;
-  const all = await chrome.tabs.query({ windowId });
-  const [locked, manualNamed] = await Promise.all([readLockedGroupIds(), readManualNamedGroups()]);
+  const [all, existing, locked, manualNamed] = await Promise.all([
+    chrome.tabs.query({ windowId }),
+    chrome.tabGroups.query({ windowId }),
+    readLockedGroupIds(),
+    readManualNamedGroups(),
+  ]);
+  const genericDomainGroupIds = new Set(
+    existing
+      .filter(g => !locked.has(g.id) && !manualNamed.has(g.id) && isGenericDomainGroup(g.title))
+      .map(g => g.id),
+  );
   const tabs = all.filter(t => isAnalysisTab(t, settings)
     && !(t.groupId !== -1 && (locked.has(t.groupId) || (incremental && manualNamed.has(t.groupId)))));
-  const target = incremental ? tabs.filter(t => t.groupId === -1 || autoState.tabs[t.id]?.dirty) : tabs;
+  const target = incremental
+    ? tabs.filter(t => t.groupId === -1 || genericDomainGroupIds.has(t.groupId) || autoState.tabs[t.id]?.dirty)
+    : tabs;
   // Freeze navigation revisions before advice/extraction/service latency, not afterwards.
   const revisions = new Map(target.map(t => [t.id, autoState.tabs[t.id]?.revision ?? null]));
   const cleanup = await organizeCleanup(windowId);
   if (!target.length) {
     return { ok: true, empty: true, cleanup, message: incremental ? '没有待整理的新标签页或内容变化' : '没有可整理的网页标签页' };
   }
-  const existing = await chrome.tabGroups.query({ windowId });
-  const { enriched, context } = await collectContext(target, all, { existing, manualNamed, locked });
+  const aggRules = Array.isArray(settings.aggregationRules) ? settings.aggregationRules : [];
+  const { enriched, context, snapshotTabs, snapshotGroups } = await collectContext(target, all, { existing, manualNamed, locked, aggregationRules: aggRules });
+  const existingGroupNames = existing
+    .filter(g => manualNamed.has(g.id) || locked.has(g.id) || !isGenericDomainGroup(g.title))
+    .map(g => g.title);
   const result = await callService(settings, {
     tabs: enriched, context, mode: incremental ? 'incremental' : 'full',
-    existingGroups: existing.map(g => g.title), language: 'zh',
+    existingGroups: existingGroupNames, language: 'zh',
+    windowId,
+    ...(aggRules.length ? { aggregationRules: aggRules } : {}),
+    _snapshotTabs: snapshotTabs,
+    _snapshotGroups: snapshotGroups,
   });
   // Turning auto off cancels only alarm-owned work, never a manual/home request.
   if (automatic && !(await getSettings()).autoOrganize) return { ok: true, cancelled: true, applied: false };
@@ -534,6 +891,7 @@ async function organize({ apply = false, incremental = false, windowId = null, a
     windowId, incremental, groups: result.groups, source: result.source, cleanup,
     backend: result.backend || null, note: result.note || null, elapsedMs: result.elapsedMs ?? null,
     cache: result.cache || null, tabTitles: Array.isArray(result.tabTitles) ? result.tabTitles : [],
+    aggregationAudit: result.aggregationAudit || null,
     analysisGuards: enriched.map(t => ({ id: t.id, url: t.url, snippet: t.snippet, originalTitle: t.title,
       groupId: target.find(tab => tab.id === t.id).groupId, revision: revisions.get(t.id) })),
     titleStats: { updated: 0, unchanged: 0, skipped: 0 },
@@ -563,8 +921,13 @@ async function validateAnalysis(proposal) {
 
 async function writeTabTitles(proposal, valid) {
   const stats = { updated: 0, unchanged: 0, skipped: 0 };
+  const manualTitles = await readManualTabTitles();
   const rows = new Map((proposal.tabTitles || []).filter(row => row?.source === 'ai').map(row => [row.id, row]));
   for (const guard of proposal.analysisGuards || []) {
+    const manual = manualTitles[guard.id];
+    if (manual?.title && (!manual.url || manual.url === normalizeUrl(guard.url || ''))) {
+      stats.unchanged++; continue;
+    }
     const row = rows.get(guard.id);
     const title = Array.from(String(row?.title || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').replace(/\s+/g, ' ').trim()).slice(0, 48).join('');
     if (!valid.has(guard.id) || !guard.snippet || !/^https?:\/\//.test(guard.url || '') || !row || !title) {
@@ -619,6 +982,7 @@ async function applyOrganizeProposal(proposal, automatic = false) {
     at: Date.now(), applied: proposal.applied, source: proposal.source, backend: proposal.backend,
     groups: proposal.groups.length, tabs: proposal.tabCount, cache: proposal.cache || null,
     titleStats: proposal.titleStats, elapsedMs: proposal.elapsedMs, empty, cleanup: proposal.cleanup || null,
+    aggregationAudit: proposal.aggregationAudit || null,
   } });
   if (snapshot) await pushHistory({ source: proposal.source, backend: proposal.backend,
     windowId: proposal.windowId, tabCount: proposal.tabCount, groups: proposal.groups, snapshot });
@@ -644,11 +1008,21 @@ async function applyProposalNow(proposal) {
   const eligible = proposal.eligibleTabIds ? new Set(proposal.eligibleTabIds) : null;
   const hits = new Set(proposal.cache?.hitTabIds || []);
   const guards = new Map((proposal.analysisGuards || []).map(t => [t.id, t]));
-  const previouslyGrouped = new Set((proposal.analysisGuards || []).filter(t => t.groupId !== -1).map(t => t.id));
-  const [existing, manualNamed] = await Promise.all([
+  const [existing, manualNamed, locked] = await Promise.all([
     chrome.tabGroups.query({ windowId }),
     readManualNamedGroups(),
+    readLockedGroupIds(),
   ]);
+  const genericDomainGroupIds = new Set(
+    existing
+      .filter(e => !manualNamed.has(e.id) && !locked.has(e.id) && isGenericDomainGroup(e.title))
+      .map(e => e.id),
+  );
+  const previouslyGrouped = new Set(
+    (proposal.analysisGuards || [])
+      .filter(t => t.groupId !== -1 && !genericDomainGroupIds.has(t.groupId))
+      .map(t => t.id),
+  );
   const plans = groups.map(g => {
     const ids = g.tabIds.filter(id => byId.has(id) && (!eligible || eligible.has(id))
       && (!guards.has(id) || (byId.get(id).url === guards.get(id).url && byId.get(id).status !== 'loading'
@@ -1085,6 +1459,32 @@ async function discardIdleTabs({ windowId = null, minIdleMinutes = 0, tabIds = n
   let discarded = 0;
   let failed = 0;
   if (typeof chrome.tabs?.discard === 'function') {
+    // Preserve page content excerpts into tabMetaCache before putting tabs to sleep
+    if (candidates.length && typeof chrome.storage?.local?.get === 'function') {
+      try {
+        const raw = (await chrome.storage.local.get(TAB_META_KEY))?.[TAB_META_KEY];
+        const metaMap = raw && typeof raw === 'object' ? raw : {};
+        const uncached = candidates.filter(t => !metaMap[normalizeUrl(t.url)]?.excerpt).slice(0, 16);
+        if (uncached.length) {
+          const preDeadline = Date.now() + 2500;
+          let idx = 0;
+          const updates = [];
+          const preWorker = async () => {
+            while (idx < uncached.length && Date.now() < preDeadline) {
+              const t = uncached[idx++];
+              const d = await extractSnippet(t);
+              if (d) {
+                const s = buildSnippetSummary(d);
+                const ex = buildSnippetExcerpt(d);
+                if (s || ex) updates.push({ url: t.url, summary: s, excerpt: ex, source: 'snippet' });
+              }
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(EXTRACT_CONCURRENCY, uncached.length) }, preWorker));
+          if (updates.length) await updateTabMetaCache(updates);
+        }
+      } catch { /* pre-discard excerpt capture is best-effort */ }
+    }
     for (const tab of candidates) {
       try {
         const res = await chrome.tabs.discard(tab.id);
@@ -1343,6 +1743,51 @@ function deleteGroupArchive(id) {
 }
 
 let activeWorkQueue = Promise.resolve();
+const RECENT_VISITS_KEY = 'recentTabVisits';
+const MAX_RECENT_VISITS = 160;
+let recentVisitsReady = null;
+let recentVisitsMap = {};
+let recentVisitsQueue = Promise.resolve();
+
+function loadRecentVisits() {
+  return (recentVisitsReady ||= (async () => {
+    try {
+      const stored = (await chrome.storage?.session?.get?.(RECENT_VISITS_KEY))?.[RECENT_VISITS_KEY];
+      if (stored && typeof stored === 'object') {
+        recentVisitsMap = { ...stored, ...recentVisitsMap };
+      }
+    } catch { /* ignore */ }
+    return recentVisitsMap;
+  })());
+}
+
+function stampRecentVisit(tabId, at = Date.now()) {
+  if (!Number.isInteger(tabId) || tabId < 0) return Promise.resolve();
+  recentVisitsMap[tabId] = Math.max(Number(recentVisitsMap[tabId]) || 0, at);
+  recentVisitsQueue = recentVisitsQueue.then(async () => {
+    await loadRecentVisits();
+    recentVisitsMap[tabId] = Math.max(Number(recentVisitsMap[tabId]) || 0, at);
+    const entries = Object.entries(recentVisitsMap)
+      .filter(([, ts]) => Number.isFinite(ts) && ts > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, MAX_RECENT_VISITS);
+    recentVisitsMap = Object.fromEntries(entries);
+    await chrome.storage?.session?.set?.({ [RECENT_VISITS_KEY]: recentVisitsMap });
+  }).catch(() => {});
+  return recentVisitsQueue;
+}
+
+function removeRecentVisit(tabId) {
+  if (!Number.isInteger(tabId) || tabId < 0) return Promise.resolve();
+  delete recentVisitsMap[tabId];
+  recentVisitsQueue = recentVisitsQueue.then(async () => {
+    await loadRecentVisits();
+    delete recentVisitsMap[tabId];
+    await chrome.storage?.session?.set?.({ [RECENT_VISITS_KEY]: recentVisitsMap });
+  }).catch(() => {});
+  return recentVisitsQueue;
+}
+
 let activeWorkReady = null;
 let activeWorkTabs = {};
 let activeWorkSaved = '{}';
@@ -1408,7 +1853,10 @@ function observeActiveWork(windowId, tabId = null) {
   return withActiveWork(async () => {
     let tab = tabId == null ? (await chrome.tabs.query({ windowId, active: true }))[0] : await liveArchiveTab(tabId);
     if (seq !== activeWorkSeq.get(windowId)) return;
-    if (tab?.active && tab.windowId === windowId && isWorkTab(tab)) rememberActiveWork(windowId, tab.id);
+    if (tab?.active && tab.windowId === windowId && isWorkTab(tab)) {
+      rememberActiveWork(windowId, tab.id);
+      stampRecentVisit(tab.id);
+    }
     else if (tab && activeWorkTabs[windowId]?.tabId === tab.id && !isWorkTab(tab)) delete activeWorkTabs[windowId];
     await persistActiveWork();
   }).catch(e => console.warn('观察工作标签失败:', e));
@@ -1420,14 +1868,21 @@ function forgetActiveWork(tabId, windowId = null) {
     await persistActiveWork();
   }).catch(e => console.warn('清理工作标签失败:', e));
 }
-chrome.tabs.onActivated?.addListener(info => observeActiveWork(info.windowId, info.tabId));
+chrome.tabs.onActivated?.addListener(info => {
+  stampRecentVisit(info.tabId);
+  return observeActiveWork(info.windowId, info.tabId);
+});
 chrome.tabs.onUpdated?.addListener((id, info, tab) => {
   if (info.url || info.status || info.groupId != null) {
+    if (info.url && tab?.active) stampRecentVisit(id);
     if (tab?.windowId != null) return observeActiveWork(tab.windowId, id);
     return liveArchiveTab(id).then(t => t && observeActiveWork(t.windowId, id));
   }
 });
-chrome.tabs.onRemoved?.addListener(id => forgetActiveWork(id));
+chrome.tabs.onRemoved?.addListener(id => {
+  removeRecentVisit(id);
+  return forgetActiveWork(id);
+});
 chrome.tabs.onDetached?.addListener((id, info) => forgetActiveWork(id, info.oldWindowId));
 chrome.tabs.onAttached?.addListener((id, info) => forgetActiveWork(id).then(() => observeActiveWork(info.newWindowId, id)));
 chrome.windows.onFocusChanged?.addListener(id => {
@@ -1468,22 +1923,1113 @@ function dedupKeyForTab(t) {
   return normalizeUrl(url);
 }
 
-function isUrlWhitelisted(url, whitelistSet) {
-  if (!whitelistSet || !whitelistSet.size) return false;
-  const key = normalizeUrl(url);
-  if (whitelistSet.has(key)) return true;
+const MAX_WHITELIST_RULE_LEN = 240;
+const UNSAFE_NESTED_QUANTIFIER_RE = /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*{]|\[(?:[^\]\\]|\\.)*[+*](?:[^\]\\]|\\.)*\][+*{]/;
+const REGEX_RAW_MARKER_RE = /(^\^|\$$|(^|[^\\])(\.\*|\.\+)|\\[dDwWsSbB.*+?^${}()|[\]\\/]|\[[^\]]+\]|\([^)|]*\|[^)]*\))/;
+
+function escapeRegExpLiteral(str) {
+  return String(str).replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function wildcardToRegexFragment(fragment, starExpr = '.*') {
+  return String(fragment)
+    .split('*')
+    .map(escapeRegExpLiteral)
+    .join(starExpr);
+}
+
+function compileWildcardPattern(raw) {
+  let pattern = raw;
+  const schemeMatch = pattern.match(/^(\*|https?):\/\/(.*)$/i);
+  if (schemeMatch) {
+    const schemePart = schemeMatch[1] === '*' ? 'https?://' : `${schemeMatch[1].toLowerCase()}://`;
+    const rest = schemeMatch[2];
+    const slashIdx = rest.indexOf('/');
+    const hostPart = slashIdx === -1 ? rest : rest.slice(0, slashIdx);
+    const pathPart = slashIdx === -1 ? '' : rest.slice(slashIdx);
+    const hostRegex = wildcardToRegexFragment(hostPart, '[^/]*');
+    const tailRegex = pathPart
+      ? wildcardToRegexFragment(pathPart, '.*')
+      : `${hostPart.includes(':') ? '' : '(?::\\d+)?'}(?:[/?#]|$)`;
+    return {
+      key: `${schemeMatch[1].toLowerCase()}://${hostPart.toLowerCase()}${pathPart}`,
+      regex: new RegExp(`^${schemePart}${hostRegex}${tailRegex}$`, 'i'),
+    };
+  }
+  if (pattern.startsWith('/')) {
+    return {
+      key: pattern,
+      regex: new RegExp(`^https?://[^/]+${wildcardToRegexFragment(pattern, '.*')}$`, 'i'),
+    };
+  }
+  const slashIdx = pattern.indexOf('/');
+  const hostPart = slashIdx === -1 ? pattern : pattern.slice(0, slashIdx);
+  const pathPart = slashIdx === -1 ? '' : pattern.slice(slashIdx);
+  const optionalWww = /^(\*\.|www\.|\*$)/i.test(hostPart) ? '' : '(?:www\\.)?';
+  const hostRegex = `${optionalWww}${wildcardToRegexFragment(hostPart, '[^/]*')}`;
+  const tailRegex = pathPart
+    ? wildcardToRegexFragment(pathPart, '.*')
+    : `${hostPart.includes(':') ? '' : '(?::\\d+)?'}(?:[/?#]|$)`;
+  return {
+    key: `${hostPart.toLowerCase()}${pathPart}`,
+    regex: new RegExp(`^https?://${hostRegex}${tailRegex}$`, 'i'),
+  };
+}
+
+function parseWhitelistRule(rawInput, { strict = true } = {}) {
+  const trimmed = String(rawInput || '').trim();
+  if (!trimmed) return { ok: false, message: '域名、网址或匹配规则不能为空' };
+  if (trimmed.length > MAX_WHITELIST_RULE_LEN) return strict ? { ok: false, message: `规则长度不能超过 ${MAX_WHITELIST_RULE_LEN} 个字符` } : { ok: false };
+
+  const literal = trimmed.match(/^\/(.+)\/([gimsuy]*)$/);
+  if (literal) {
+    const safeFlags = literal[2].replace(/[gy]/g, '');
+    if (UNSAFE_NESTED_QUANTIFIER_RE.test(literal[1])) return strict ? { ok: false, message: '正则表达式存在嵌套量词风险' } : { ok: false };
+    try {
+      const regex = new RegExp(literal[1], safeFlags);
+      return { ok: true, type: 'regex', key: trimmed, regex };
+    } catch (err) {
+      if (strict) return { ok: false, message: `正则表达式语法无效: ${err?.message || '请检查语法'}` };
+      return { ok: false };
+    }
+  }
+
+  const prefixed = trimmed.match(/^regex:(.*)$/i);
+  if (prefixed) {
+    const body = prefixed[1].trim();
+    if (!body) return { ok: false, message: '正则表达式不能为空' };
+    if (UNSAFE_NESTED_QUANTIFIER_RE.test(body)) return strict ? { ok: false, message: '正则表达式存在嵌套量词风险' } : { ok: false };
+    try {
+      const regex = new RegExp(body);
+      return { ok: true, type: 'regex', key: `regex:${body}`, regex };
+    } catch (err) {
+      if (strict) return { ok: false, message: `正则表达式语法无效: ${err?.message || '请检查语法'}` };
+      return { ok: false };
+    }
+  }
+
+  if (REGEX_RAW_MARKER_RE.test(trimmed)) {
+    if (UNSAFE_NESTED_QUANTIFIER_RE.test(trimmed)) return strict ? { ok: false, message: '正则表达式存在嵌套量词风险' } : { ok: false };
+    try {
+      const regex = new RegExp(trimmed);
+      return { ok: true, type: 'regex', key: trimmed, regex };
+    } catch (err) {
+      if (strict) return { ok: false, message: `正则表达式语法无效: ${err?.message || '请检查语法'}` };
+      return { ok: false };
+    }
+  }
+
+  if (trimmed.includes('*')) {
+    try {
+      const { key, regex } = compileWildcardPattern(trimmed);
+      return { ok: true, type: 'wildcard', key, regex };
+    } catch (err) {
+      if (strict) return { ok: false, message: `通配符规则无效: ${err?.message || '请检查语法'}` };
+      return { ok: false };
+    }
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    const key = normalizeUrl(trimmed);
+    return { ok: true, type: 'url', key };
+  }
+
+  const slashIdx = trimmed.indexOf('/');
+  if (slashIdx > 0) {
+    const hostPart = trimmed.slice(0, slashIdx).toLowerCase();
+    const pathPart = trimmed.slice(slashIdx);
+    const key = `${hostPart}${pathPart}`;
+    const optionalWww = /^www\./i.test(hostPart) ? '' : '(?:www\\.)?';
+    return {
+      ok: true,
+      type: 'url',
+      key,
+      regex: new RegExp(`^https?://${optionalWww}${escapeRegExpLiteral(hostPart)}${escapeRegExpLiteral(pathPart)}$`, 'i'),
+    };
+  }
+
+  const host = trimmed.replace(/^www\./i, '').toLowerCase();
+  return { ok: true, type: 'host', key: host };
+}
+
+function urlHostInfo(url) {
   try {
     const u = new URL(url);
-    const host = u.hostname.replace(/^www\./, '').toLowerCase();
-    const hostPort = u.host.replace(/^www\./, '').toLowerCase();
-    if (whitelistSet.has(host) || whitelistSet.has(hostPort) || whitelistSet.has(u.hostname.toLowerCase())) return true;
-  } catch { /* ignore */ }
+    return {
+      rawHost: u.hostname.toLowerCase(),
+      host: u.hostname.replace(/^www\./, '').toLowerCase(),
+      hostPort: u.host.replace(/^www\./, '').toLowerCase(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function matchesParsedRule(rule, key, url, hostInfo) {
+  if (!rule?.ok) return false;
+  if ((rule.type === 'host' || rule.type === 'url')) {
+    if (rule.key === key) return true;
+    if (hostInfo && (rule.key === hostInfo.host || rule.key === hostInfo.hostPort || rule.key === hostInfo.rawHost)) return true;
+  }
+  if (rule.regex && (rule.regex.test(key) || (url !== key && rule.regex.test(url)))) return true;
   return false;
+}
+
+function buildWhitelistMatcher(entries) {
+  const exact = new Set();
+  const regexes = [];
+  const rules = [];
+  for (const item of entries || []) {
+    const parsed = parseWhitelistRule(item, { strict: false });
+    if (!parsed.ok) continue;
+    rules.push(parsed);
+    if (parsed.regex) regexes.push(parsed.regex);
+    if (parsed.type === 'host' || parsed.type === 'url') exact.add(parsed.key);
+  }
+  return { exact, regexes, rules, size: exact.size + regexes.length };
+}
+
+function isUrlWhitelisted(url, whitelistInput) {
+  if (!whitelistInput) return false;
+  const matcher = whitelistInput?.regexes && whitelistInput?.exact
+    ? whitelistInput
+    : buildWhitelistMatcher(whitelistInput instanceof Set ? [...whitelistInput] : whitelistInput);
+  if (!matcher.size) return false;
+
+  const key = normalizeUrl(url);
+  if (matcher.exact.has(key)) return true;
+  const hostInfo = urlHostInfo(url);
+  if (hostInfo && (matcher.exact.has(hostInfo.host) || matcher.exact.has(hostInfo.hostPort) || matcher.exact.has(hostInfo.rawHost))) return true;
+  for (const re of matcher.regexes) {
+    if (re.test(key) || (url !== key && re.test(url))) return true;
+  }
+  return false;
+}
+
+async function testWhitelistRule({ rule = '', windowId = null } = {}) {
+  const settings = await getSettings();
+  const trimmed = String(rule || '').trim();
+  const rulesToTest = [];
+  if (trimmed) {
+    const parsed = parseWhitelistRule(trimmed, { strict: true });
+    if (!parsed.ok) return { ok: false, message: parsed.message || '域名、网址或匹配规则不能为空' };
+    rulesToTest.push(parsed);
+  } else {
+    const saved = settings.dedupWhitelist || [];
+    if (!saved.length) {
+      return { ok: false, message: '请输入测试规则，或先添加至少一条白名单规则' };
+    }
+    for (const entry of saved) {
+      const parsed = parseWhitelistRule(entry, { strict: false });
+      if (parsed.ok) rulesToTest.push(parsed);
+    }
+    if (!rulesToTest.length) {
+      return { ok: false, message: '当前没有可用的白名单规则' };
+    }
+  }
+
+  const tabs = await chrome.tabs.query(windowId != null ? { windowId } : {});
+  const candidates = tabs.filter(t => /^https?:\/\//i.test(t.url || t.pendingUrl || ''));
+  const matches = [];
+  for (const t of candidates) {
+    const url = t.url || t.pendingUrl || '';
+    const key = normalizeUrl(url);
+    const hostInfo = urlHostInfo(url);
+    const matchedRules = [];
+    for (const parsed of rulesToTest) {
+      if (matchesParsedRule(parsed, key, url, hostInfo)) matchedRules.push(parsed.key);
+    }
+    if (matchedRules.length) {
+      matches.push({
+        id: t.id,
+        windowId: t.windowId,
+        title: t.title || url,
+        url,
+        matchedRules,
+      });
+    }
+  }
+  return {
+    ok: true,
+    mode: trimmed ? 'single' : 'all',
+    rule: trimmed ? rulesToTest[0].key : '',
+    ruleType: trimmed ? rulesToTest[0].type : 'all',
+    ruleCount: rulesToTest.length,
+    totalTabs: candidates.length,
+    matchedCount: matches.length,
+    matches,
+  };
+}
+
+function isDocHubDomain(host) {
+  const h = String(host || '').toLowerCase();
+  return ['docs.google.com', 'drive.google.com', 'notion.so', 'notion.site', 'coda.io', 'quip.com', 'yuque.com', 'zhihu.com', 'juejin.cn']
+    .some(d => h === d || h.endsWith(`.${d}`));
+}
+
+function derivePathWildcardCandidate(rawUrl) {
+  if (!/^https?:\/\//i.test(String(rawUrl || ''))) return null;
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+    if (!host || isDocHubDomain(host)) return null;
+    const isIdSeg = seg => /^\d+$/.test(seg) || /^[0-9a-f-]{12,}$/i.test(seg);
+    const rawSegs = u.pathname.split('/').filter(Boolean);
+    const nonIdSegs = [];
+    for (const seg of rawSegs) {
+      if (isIdSeg(seg) || nonIdSegs.length >= 3) break;
+      nonIdSegs.push(seg);
+    }
+    if (!nonIdSegs.length) return null;
+    const depth = Math.min(2, nonIdSegs.length);
+    const chosen = nonIdSegs.slice(0, depth);
+    const lowerPath = `/${chosen.join('/').toLowerCase()}`;
+    const isConfigSystem = /\/(namespace|config|configs|setting|settings|project|pipeline|task|job|service|cluster|env|release|deploy|publish|console|workbench)\b/.test(lowerPath)
+      || /^(cloud|console|config|data|metrics|devops|ci|cd)\./.test(host)
+      || host === 'localhost' || host === '127.0.0.1';
+    const parts = host.split('.');
+    const apexDomain = parts.length >= 2 ? parts.slice(-2).join('.') : host;
+    return {
+      pattern: `https://${host}/${chosen.join('/')}/*`,
+      prefixLabel: `${host}/${chosen.join('/')}`,
+      host,
+      apexDomain,
+      isConfigSystem,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildLocalWhitelistSuggestions(tabs = [], { existingWhitelist = [], interceptedDups = [] } = {}) {
+  const httpTabs = (Array.isArray(tabs) ? tabs : []).filter(t => /^https?:\/\//i.test(String(t?.url || '')));
+  const compiledExisting = (Array.isArray(existingWhitelist) ? existingWhitelist : [])
+    .map(r => ({ raw: String(r || '').trim(), parsed: parseWhitelistRule(r, { strict: false }) }))
+    .filter(x => x.raw && x.parsed.ok);
+
+  const isCoveredByNarrowRule = pattern => {
+    const clean = pattern.replace(/^https?:\/\/(?:www\.)?/i, '').toLowerCase();
+    return compiledExisting.some(e => {
+      if (e.parsed.type === 'host') return false;
+      const ek = e.raw.replace(/^https?:\/\/(?:www\.)?/i, '').toLowerCase();
+      if (ek === clean) return true;
+      const sampleUrl = pattern.replace(/\*+$/, 'sample');
+      return matchesParsedRule(e.parsed, normalizeUrl(sampleUrl), sampleUrl, urlHostInfo(sampleUrl));
+    });
+  };
+
+  const candidates = new Map();
+  const upsert = (pattern, patch) => {
+    const cur = candidates.get(pattern) || {
+      rule: pattern,
+      kind: 'add',
+      replaces: null,
+      isConfigSystem: Boolean(patch.isConfigSystem),
+      interceptCount: 0,
+      forcedOpenCount: 0,
+      dupUrlCount: 0,
+      reasons: new Set(),
+    };
+    cur.interceptCount += patch.interceptCount || 0;
+    cur.forcedOpenCount += patch.forcedOpenCount || 0;
+    cur.dupUrlCount += patch.dupUrlCount || 0;
+    if (patch.kind === 'refine') {
+      cur.kind = 'refine';
+      cur.replaces = patch.replaces;
+      if (Array.isArray(patch.replacesList) && patch.replacesList.length) {
+        cur.replacesList = [...new Set([...(cur.replacesList || []), ...patch.replacesList])];
+      } else if (patch.replaces) {
+        cur.replacesList = [...new Set([...(cur.replacesList || []), patch.replaces])];
+      }
+    }
+    if (Array.isArray(patch.changes) && patch.changes.length) {
+      cur.changes = [...new Set([...(cur.changes || []), ...patch.changes])];
+    }
+    if (patch.reason) cur.reasons.add(patch.reason);
+    candidates.set(pattern, cur);
+  };
+
+  for (const item of Array.isArray(interceptedDups) ? interceptedDups : []) {
+    if (!item?.url) continue;
+    const cand = derivePathWildcardCandidate(item.url);
+    if (!cand || isCoveredByNarrowRule(cand.pattern)) continue;
+    upsert(cand.pattern, {
+      isConfigSystem: cand.isConfigSystem,
+      interceptCount: Number(item.count) || 1,
+      forcedOpenCount: item.forcedOpen ? 1 : 0,
+      reason: item.forcedOpen
+        ? '你曾在该路径下点击「仍要双开」，建议按路径通配放行多开'
+        : '该路径近期触发过重复标签拦截，若需多开对比可放行此路径',
+    });
+  }
+
+  const byPattern = new Map();
+  const byNormUrl = new Map();
+  for (const t of httpTabs) {
+    const nu = normalizeUrl(t.url);
+    byNormUrl.set(nu, (byNormUrl.get(nu) || 0) + 1);
+    const cand = derivePathWildcardCandidate(t.url);
+    if (!cand) continue;
+    const list = byPattern.get(cand.pattern) || { cand, tabs: [] };
+    list.tabs.push(t);
+    byPattern.set(cand.pattern, list);
+  }
+
+  for (const existing of compiledExisting) {
+    if (existing.parsed.type !== 'host') continue;
+    const hostKey = existing.parsed.key.toLowerCase();
+    const matching = [...byPattern.values()].filter(
+      entry => (entry.cand.host === hostKey || entry.cand.apexDomain === hostKey) && entry.tabs.length >= 2,
+    );
+    if (matching.length >= 1 && matching.length <= 3) {
+      for (const target of matching) {
+        upsert(target.cand.pattern, {
+          kind: 'refine',
+          replaces: existing.raw,
+          replacesList: [existing.raw],
+          changes: [`收敛整站 ${existing.raw}`],
+          isConfigSystem: target.cand.isConfigSystem,
+          reason: `现有白名单「${existing.raw}」放行整站范围过大，建议结合新开页面收敛为具体路径「${target.cand.prefixLabel}/*」`,
+        });
+      }
+    }
+  }
+
+  for (const { cand, tabs: memberTabs } of byPattern.values()) {
+    if (memberTabs.length < 2) continue;
+    const sampleBase = cand.pattern.replace(/\*+$/, '').replace(/^https?:\/\/(?:www\.)?/i, '').toLowerCase();
+    const overlappingNarrow = compiledExisting.filter(e => {
+      if (e.parsed.type === 'host' || e.parsed.type === 'regex') return false;
+      const normExisting = String(e.raw || '').replace(/\*+$/, '').replace(/^https?:\/\/(?:www\.)?/i, '').toLowerCase();
+      return normExisting.startsWith(sampleBase) && normExisting.length > sampleBase.length;
+    });
+    if (overlappingNarrow.length >= 2 || (overlappingNarrow.length === 1 && !isCoveredByNarrowRule(cand.pattern))) {
+      const repList = overlappingNarrow.map(e => e.raw);
+      upsert(cand.pattern, {
+        kind: 'refine',
+        replaces: repList[0],
+        replacesList: repList,
+        changes: [`叠加合并 ${repList.length} 条子路径`],
+        isConfigSystem: cand.isConfigSystem,
+        reason: `结合现有规则「${repList[0]}」与新开同模块页面，建议合并为「${cand.prefixLabel}/*」统一放行并保留其余路径防重`,
+      });
+    }
+  }
+
+  for (const { cand, tabs: memberTabs } of byPattern.values()) {
+    if (isCoveredByNarrowRule(cand.pattern)) continue;
+    const hasExactDup = memberTabs.some(t => (byNormUrl.get(normalizeUrl(t.url)) || 0) >= 2);
+    const distinctContents = new Set(
+      memberTabs
+        .map(t => String(t.snippet || t.cachedSummary || t.manualTitle || t.title || '').replace(/\s+/g, ' ').trim().slice(0, 60).toLowerCase())
+        .filter(Boolean),
+    ).size;
+    const hasContentVariance = distinctContents >= 2;
+    if (!cand.isConfigSystem && !hasExactDup && !hasContentVariance && memberTabs.length < 3) continue;
+    if (memberTabs.length < 2) continue;
+    const broadHostCovered = compiledExisting.find(
+      e => e.parsed.type === 'host' && (e.parsed.key === cand.host || e.parsed.key === cand.apexDomain),
+    );
+    if (broadHostCovered && candidates.has(cand.pattern)) continue;
+    upsert(cand.pattern, {
+      isConfigSystem: cand.isConfigSystem,
+      dupUrlCount: hasExactDup ? 1 : 0,
+      reason: hasExactDup
+        ? `当前窗口已同时多开该路径下的相同链接（${memberTabs.length} 个标签），建议添加路径白名单避免新开被拦截`
+        : hasContentVariance
+          ? `结合页面内容分析：${memberTabs.length} 个同路径页展示不同配置/上下文，添加路径通配后可自由多开对比`
+          : `检测到 ${memberTabs.length} 个同路径配置/工作台标签并行打开，添加路径通配后可在该模块下自由多开对比`,
+    });
+  }
+
+  const out = [];
+  for (const item of candidates.values()) {
+    const parsed = parseWhitelistRule(item.rule, { strict: false });
+    if (!parsed.ok) continue;
+    const matchedTabs = httpTabs.filter(t => matchesParsedRule(parsed, normalizeUrl(t.url), t.url, urlHostInfo(t.url)));
+    if (!matchedTabs.length) continue;
+    const score = (item.kind === 'refine' ? 40 : 0)
+      + item.forcedOpenCount * 35
+      + item.interceptCount * 25
+      + item.dupUrlCount * 20
+      + (item.isConfigSystem ? 15 : 0)
+      + matchedTabs.length * 3;
+    out.push({
+      rule: item.rule,
+      kind: item.kind,
+      ...(item.replaces ? { replaces: item.replaces } : {}),
+      ...(item.replacesList?.length ? { replacesList: item.replacesList } : {}),
+      ...(item.changes?.length ? { changes: item.changes } : {}),
+      reason: [...item.reasons][0] || `匹配当前 ${matchedTabs.length} 个并行工作台页面`,
+      matchedCount: matchedTabs.length,
+      matchedTabIds: matchedTabs.map(t => t.id),
+      sampleTitles: matchedTabs.slice(0, 4).map(t => String(t.manualTitle || t.title || t.url).slice(0, 48)),
+      confidence: score >= 35 ? 'high' : 'medium',
+      source: 'heuristic',
+      _score: score,
+    });
+  }
+
+  return out.sort((a, b) => b._score - a._score).slice(0, 6).map(({ _score: _s, ...rest }) => rest);
+}
+
+/** Extract bounded live page snippets so both whitelist & aggregation suggestions see real page content. */
+async function enrichTabsWithPageContent(tabs = [], { maxExtract = 16, budgetMs = 2400 } = {}) {
+  const [metaRaw, manualTitles] = await Promise.all([
+    chrome.storage?.local?.get?.(TAB_META_KEY).catch(() => ({})) || Promise.resolve({}),
+    typeof readManualTabTitles === 'function' ? readManualTabTitles().catch(() => ({})) : Promise.resolve({}),
+  ]);
+  const tabMetaMap = metaRaw?.[TAB_META_KEY] && typeof metaRaw[TAB_META_KEY] === 'object' ? metaRaw[TAB_META_KEY] : {};
+  const httpTabs = (Array.isArray(tabs) ? tabs : []).filter(t => /^https?:\/\//i.test(t.url || ''));
+
+  const toExtract = httpTabs.filter(t => {
+    if (t.discarded || t.snippet) return false;
+    const cached = tabMetaMap[normalizeUrl(t.url)];
+    return !cached?.excerpt;
+  }).slice(0, maxExtract);
+
+  const snippets = new Map();
+  if (toExtract.length && typeof extractSnippet === 'function') {
+    const deadline = Date.now() + budgetMs;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < toExtract.length && Date.now() < deadline) {
+        const t = toExtract[cursor++];
+        const d = await extractSnippet(t).catch(() => null);
+        if (d) snippets.set(t.id, d);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(EXTRACT_CONCURRENCY, toExtract.length) }, worker));
+    if (snippets.size) {
+      const updates = [];
+      for (const t of toExtract) {
+        const d = snippets.get(t.id);
+        if (!d) continue;
+        const excerpt = buildSnippetExcerpt(d);
+        const summary = buildSnippetSummary(d);
+        if (excerpt || summary) updates.push({ url: t.url, excerpt, summary });
+      }
+      if (updates.length) await updateTabMetaCache(updates);
+    }
+  }
+
+  return httpTabs.map(t => {
+    const norm = normalizeUrl(t.url);
+    const meta = tabMetaMap[norm];
+    const manual = manualTitles?.[t.id];
+    const manualTitle = manual?.title && (!manual.url || manual.url === norm) ? manual.title : null;
+    const liveText = snippets.has(t.id) ? snippetText(snippets.get(t.id)) : (t.snippet || '');
+    const cachedHint = meta?.excerpt || meta?.summary || t.cachedSummary || '';
+    return {
+      id: t.id,
+      windowId: t.windowId,
+      ...(manualTitle ? { manualTitle } : {}),
+      title: manualTitle || meta?.title || snippets.get(t.id)?.originalTitle || t.title || t.url,
+      url: t.url,
+      ...(liveText ? { snippet: liveText } : {}),
+      ...(!liveText && cachedHint ? { cachedSummary: String(cachedHint).slice(0, 240) } : {}),
+    };
+  });
+}
+
+async function postSuggestionEndpoint(settings, pathname, payload, timeoutMs = 18000) {
+  const base = safeLocalServiceUrl(settings.serviceUrl);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}${pathname}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    });
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.ok && Array.isArray(data.suggestions)) {
+      return {
+        ok: true,
+        source: data.source || 'ai',
+        backend: data.backend || null,
+        suggestions: data.suggestions,
+      };
+    }
+  } catch { /* fall back cleanly to local suggestions */ }
+  finally { clearTimeout(timer); }
+  return null;
+}
+
+async function suggestWhitelistRules({ windowId = null, useAi = true } = {}) {
+  const settings = await getSettings();
+  const existingWhitelist = Array.isArray(settings.dedupWhitelist) ? settings.dedupWhitelist : [];
+  const [tabs, sessionData] = await Promise.all([
+    chrome.tabs.query(windowId != null ? { windowId } : {}),
+    chrome.storage.session?.get?.(['recentInterceptedDups', 'lastInterceptedDup']).catch(() => ({})),
+  ]);
+  const recentList = Array.isArray(sessionData?.recentInterceptedDups) ? [...sessionData.recentInterceptedDups] : [];
+  if (sessionData?.lastInterceptedDup?.url && !recentList.some(r => r.url === sessionData.lastInterceptedDup.url)) {
+    recentList.unshift(sessionData.lastInterceptedDup);
+  }
+  const enrichedTabs = await enrichTabsWithPageContent(tabs);
+  const localSuggestions = buildLocalWhitelistSuggestions(enrichedTabs, {
+    existingWhitelist,
+    interceptedDups: recentList,
+  });
+
+  if (!useAi || !enrichedTabs.length) {
+    return { ok: true, source: 'heuristic', suggestions: localSuggestions };
+  }
+  const remote = await postSuggestionEndpoint(settings, '/whitelist/suggest', {
+    tabs: enrichedTabs,
+    existingWhitelist,
+    interceptedDups: recentList,
+  });
+  return remote || { ok: true, source: 'heuristic', suggestions: localSuggestions };
+}
+
+function parseAggregationQueryKeys(input) {
+  const arr = Array.isArray(input) ? input : String(input || '').split(/[,，\s&]+/);
+  return [...new Set(arr.map(s => String(s || '').trim().replace(/^\?/, '')).filter(Boolean))].slice(0, 12);
+}
+
+function parseAggregationRuleSpec(raw, { strict = false } = {}) {
+  if (!raw) return strict ? { ok: false, message: '聚合层级规则不能为空' } : { ok: false };
+  let pattern = '';
+  let pathDepth = null;
+  let queryKeys = [];
+  let label = '';
+  let id = '';
+
+  if (typeof raw === 'string') {
+    const chunks = raw.split(/\s*\|\s*/).map(s => s.trim()).filter(Boolean);
+    pattern = chunks[0] || '';
+    for (const part of chunks.slice(1)) {
+      const mDepth = part.match(/^(?:depth|level|pathDepth)\s*=\s*(\d+|auto)$/i);
+      if (mDepth) {
+        pathDepth = mDepth[1].toLowerCase() === 'auto' ? null : Math.min(8, Math.max(0, Number(mDepth[1])));
+        continue;
+      }
+      const mParams = part.match(/^(?:params?|queryKeys?|keys?)\s*=\s*(.+)$/i);
+      if (mParams) {
+        queryKeys = parseAggregationQueryKeys(mParams[1]);
+        continue;
+      }
+      const mLabel = part.match(/^label\s*=\s*(.+)$/i);
+      if (mLabel) label = mLabel[1].trim().slice(0, 24);
+    }
+    const qIdx = pattern.indexOf('?');
+    if (qIdx > -1 && !/^\/.+\/[gimsuy]*$/.test(pattern) && !/^regex:/i.test(pattern)) {
+      const qRaw = pattern.slice(qIdx + 1);
+      if (qRaw && !qRaw.includes('=')) {
+        pattern = pattern.slice(0, qIdx);
+        queryKeys = [...new Set([...queryKeys, ...parseAggregationQueryKeys(qRaw)])];
+      }
+    }
+  } else if (typeof raw === 'object') {
+    id = String(raw.id || '').trim();
+    pattern = String(raw.pattern || raw.url || '').trim();
+    if (raw.pathDepth !== null && raw.pathDepth !== undefined && raw.pathDepth !== '' && raw.pathDepth !== 'auto') {
+      const d = Number(raw.pathDepth);
+      if (!Number.isInteger(d) || d < 0 || d > 8) {
+        return strict ? { ok: false, message: 'Path 层级深度必须是 0~8 之间的整数或自动' } : { ok: false };
+      }
+      pathDepth = d;
+    }
+    queryKeys = parseAggregationQueryKeys(raw.queryKeys ?? raw.params ?? '');
+    label = String(raw.label || '').trim().slice(0, 24);
+  }
+
+  const parsedPattern = parseWhitelistRule(pattern, { strict });
+  if (!parsedPattern.ok) return parsedPattern;
+  // For aggregation rules, non-wildcard path prefixes (e.g. https://host/console/deploy) match child paths & queries too
+  if (parsedPattern.type === 'url') {
+    const noProto = parsedPattern.key.replace(/^https?:\/\/(?:www\.)?/i, '').replace(/\/+$/, '');
+    const optionalWww = /^www\./i.test(noProto) ? '' : '(?:www\\.)?';
+    parsedPattern.regex = new RegExp(`^https?://${optionalWww}${escapeRegExpLiteral(noProto)}(?:[/?#].*)?$`, 'i');
+  }
+  const canonicalPatternKey = parsedPattern.type === 'regex'
+    ? parsedPattern.key
+    : String(parsedPattern.key || '').replace(/^https?:\/\/(?:www\.)?/i, '').replace(/\/?\*+$/, '').replace(/\/+$/, '').toLowerCase();
+  const stableId = id || `${canonicalPatternKey}|d=${pathDepth ?? 'auto'}|q=${queryKeys.join(',')}`;
+  return {
+    ok: true,
+    rule: {
+      id: stableId,
+      patternKey: canonicalPatternKey,
+      pattern: pattern.trim(),
+      pathDepth,
+      queryKeys,
+      ...(label ? { label } : {}),
+    },
+    parsedPattern,
+  };
+}
+
+function compileAggregationRules(rawRules = []) {
+  const out = [];
+  for (const item of Array.isArray(rawRules) ? rawRules : []) {
+    if (item && item.parsedPattern && item.rule) {
+      out.push(item);
+      continue;
+    }
+    const spec = parseAggregationRuleSpec(item, { strict: false });
+    if (spec.ok) out.push(spec);
+  }
+  return out;
+}
+
+function resolveUrlAggregationIdentity(rawUrl, rawRules = []) {
+  const str = String(rawUrl || '');
+  if (!/^https?:\/\//i.test(str)) return { matched: false };
+  const normKey = normalizeUrl(str);
+  const hostInfo = urlHostInfo(str);
+  if (!hostInfo) return { matched: false };
+
+  const compiled = compileAggregationRules(rawRules);
+  let matchedSpec = null;
+  for (const spec of compiled) {
+    if (matchesParsedRule(spec.parsedPattern, normKey, str, hostInfo)) {
+      matchedSpec = spec.rule;
+      break;
+    }
+  }
+  if (!matchedSpec) return { matched: false };
+
+  let u;
+  try { u = new URL(str); } catch { return { matched: false }; }
+  const isIdSeg = seg => /^\d+$/.test(seg) || /^[0-9a-f-]{12,}$/i.test(seg);
+  const pathSegments = u.pathname.split('/').filter(Boolean);
+  let segs = [];
+  if (matchedSpec.pathDepth === 0) {
+    segs = [];
+  } else if (Number.isInteger(matchedSpec.pathDepth) && matchedSpec.pathDepth > 0) {
+    segs = pathSegments.slice(0, matchedSpec.pathDepth);
+  } else {
+    for (const seg of pathSegments) {
+      if (isIdSeg(seg) || segs.length >= 5) break;
+      segs.push(seg);
+    }
+  }
+  const pathScope = segs.length ? `${hostInfo.host}/${segs.join('/')}` : hostInfo.host;
+  const paramSources = [u.searchParams];
+  if (u.hash && u.hash.includes('?')) {
+    const hashQ = u.hash.slice(u.hash.indexOf('?') + 1);
+    if (hashQ) paramSources.push(new URLSearchParams(hashQ));
+  }
+  const params = [];
+  for (const qk of matchedSpec.queryKeys || []) {
+    const lowKey = qk.toLowerCase();
+    const collected = [];
+    for (const sp of paramSources) {
+      for (const [k, v] of sp.entries()) {
+        if (k.toLowerCase() === lowKey && String(v || '').trim()) {
+          collected.push(String(v).trim());
+        }
+      }
+    }
+    const vals = [...new Set(collected)].sort();
+    if (vals.length) params.push({ key: qk, value: vals.join(',') });
+  }
+  const queryPart = params.map(p => `${p.key}=${p.value}`).join('&');
+  const aggregationKey = queryPart ? `${pathScope}?${queryPart}` : pathScope;
+  const paramSummary = params.map(p => `${p.key}=${p.value}`).join(' · ');
+  return {
+    matched: true,
+    ruleId: matchedSpec.id,
+    pattern: matchedSpec.pattern,
+    pathDepth: matchedSpec.pathDepth,
+    pathScope,
+    params,
+    paramSummary,
+    aggregationKey,
+  };
+}
+
+async function testAggregationRule({ rule = null, pattern = '', pathDepth = null, queryKeys = '', label = '', windowId = null } = {}) {
+  const settings = await getSettings();
+  const hasCandidate = Boolean(String(rule || pattern || '').trim());
+  const rulesToTest = [];
+  if (hasCandidate) {
+    const raw = rule && typeof rule === 'object'
+      ? rule
+      : (typeof rule === 'string' && rule.trim() ? rule.trim() : { pattern, pathDepth, queryKeys, label });
+    const parsed = parseAggregationRuleSpec(raw, { strict: true });
+    if (!parsed.ok) return { ok: false, message: parsed.message || '聚合层级规则无效' };
+    rulesToTest.push(parsed.rule);
+  } else {
+    const saved = Array.isArray(settings.aggregationRules) ? settings.aggregationRules : [];
+    if (!saved.length) return { ok: false, message: '请输入匹配路径，或先添加至少一条聚合层级规则' };
+    for (const item of saved) {
+      const parsed = parseAggregationRuleSpec(item, { strict: false });
+      if (parsed.ok) rulesToTest.push(parsed.rule);
+    }
+    if (!rulesToTest.length) return { ok: false, message: '当前没有有效的聚合层级规则' };
+  }
+
+  const compiledRules = compileAggregationRules(rulesToTest);
+  const tabs = await chrome.tabs.query(windowId != null ? { windowId } : {});
+  const candidates = tabs.filter(t => /^https?:\/\//i.test(t.url || t.pendingUrl || ''));
+  const matches = [];
+  const buckets = new Map();
+  for (const t of candidates) {
+    const url = t.url || t.pendingUrl || '';
+    const idn = resolveUrlAggregationIdentity(url, compiledRules);
+    if (!idn.matched) continue;
+    matches.push({
+      id: t.id,
+      windowId: t.windowId,
+      title: t.title || url,
+      url,
+      aggregationKey: idn.aggregationKey,
+      paramSummary: idn.paramSummary,
+    });
+    if (!buckets.has(idn.aggregationKey)) {
+      buckets.set(idn.aggregationKey, {
+        aggregationKey: idn.aggregationKey,
+        paramSummary: idn.paramSummary,
+        count: 0,
+        tabIds: [],
+      });
+    }
+    const b = buckets.get(idn.aggregationKey);
+    b.count += 1;
+    b.tabIds.push(t.id);
+  }
+  return {
+    ok: true,
+    mode: hasCandidate ? 'single' : 'all',
+    ruleCount: rulesToTest.length,
+    totalTabs: candidates.length,
+    matchedCount: matches.length,
+    distinctKeysCount: buckets.size,
+    buckets: [...buckets.values()].sort((a, b) => b.count - a.count),
+    matches,
+  };
+}
+
+const AGGREGATION_NOISE_QUERY_KEYS = new Set([
+  'spm', 'from', 'ref', 'source', '_t', 't', 'timestamp', 'ts', 'lang', 'locale',
+  'theme', 'redirect', 'redirect_uri', 'callback', 'session', 'token', 'code', 'state',
+  'x-requested-with', 'v', 'version',
+]);
+const AGGREGATION_PRIORITY_QUERY_KEYS = new Set([
+  'spaceid', 'site', 'env', 'stage', 'namespace', 'ns',
+  'project', 'projectid', 'appid', 'app', 'cluster', 'region', 'tenant', 'tenantid',
+  'branch', 'pipeline', 'pipelineid', 'workspace', 'workspaceid', 'repo', 'org', 'group',
+]);
+
+function extractLocalMeaningfulParams(rawUrl) {
+  const out = {};
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const sources = [u.searchParams];
+    if (u.hash && u.hash.includes('?')) {
+      const hq = u.hash.slice(u.hash.indexOf('?') + 1);
+      if (hq) sources.push(new URLSearchParams(hq));
+    }
+    const map = new Map();
+    for (const sp of sources) {
+      for (const [k, v] of sp.entries()) {
+        const key = String(k || '').trim();
+        const val = String(v || '').trim();
+        if (!key || !val) continue;
+        const low = key.toLowerCase();
+        if (low.startsWith('utm_') || low.startsWith('spm_') || AGGREGATION_NOISE_QUERY_KEYS.has(low)) continue;
+        const arr = map.get(key) || [];
+        arr.push(val);
+        map.set(key, arr);
+      }
+    }
+    for (const [k, vals] of map.entries()) out[k] = [...new Set(vals)].sort().join(',');
+  } catch { /* ignore */ }
+  return out;
+}
+
+function localTabContentTokens(tab) {
+  const raw = [tab?.manualTitle || tab?.title || '', tab?.snippet || tab?.cachedSummary || ''].join(' ').toLowerCase();
+  return new Set(raw.match(/[\u4e00-\u9fff]{2,6}|[a-z0-9][a-z0-9._-]{2,}/g) || []);
+}
+
+function localTokenJaccard(a, b) {
+  if (!a.size || !b.size) return 0.5;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter += 1;
+  const union = a.size + b.size - inter;
+  return union ? inter / union : 1;
+}
+
+function buildLocalAggregationSuggestions(tabs = [], { existingRules = [] } = {}) {
+  const httpTabs = (Array.isArray(tabs) ? tabs : []).filter(t => /^https?:\/\//i.test(String(t?.url || '')));
+  const compiledExisting = compileAggregationRules(existingRules);
+  const byPattern = new Map();
+
+  for (const t of httpTabs) {
+    const cand = derivePathWildcardCandidate(t.url);
+    if (!cand) continue;
+    let u;
+    try { u = new URL(t.url); } catch { continue; }
+    const segs = u.pathname.split('/').filter(Boolean);
+    const nonIdSegs = [];
+    for (const seg of segs) {
+      if (/^\d+$/.test(seg) || /^[0-9a-f-]{12,}$/i.test(seg)) break;
+      nonIdSegs.push(seg);
+    }
+    const qParams = extractLocalMeaningfulParams(t.url);
+    if ((/docs\.google\.com|notion\.so|notion\.site|confluence/i.test(cand.host)) && !Object.keys(qParams).length) continue;
+    const entry = byPattern.get(cand.pattern) || { cand, tabs: [], nonIdDepths: [], segArrays: [], qMaps: [], tokens: [] };
+    entry.tabs.push(t);
+    entry.nonIdDepths.push(nonIdSegs.length);
+    entry.segArrays.push(segs);
+    entry.qMaps.push(qParams);
+    entry.tokens.push(localTabContentTokens(t));
+    byPattern.set(cand.pattern, entry);
+  }
+
+  const out = [];
+  for (const { cand, tabs: memberTabs, nonIdDepths, segArrays, qMaps, tokens } of byPattern.values()) {
+    if (memberTabs.length < 2) continue;
+    const maxD = Math.max(...nonIdDepths, 1);
+    const minD = Math.min(...nonIdDepths, 1);
+    let pathDepth = null;
+    for (let d = Math.max(2, cand.prefixLabel.split('/').length - 1); d <= Math.min(4, maxD); d++) {
+      if (new Set(segArrays.map(s => s.slice(0, d).join('/'))).size >= 2) { pathDepth = d; break; }
+    }
+    if (pathDepth === null && segArrays.some((s, idx) => s.length > nonIdDepths[idx])) {
+      pathDepth = Math.min(5, Math.max(2, minD));
+    }
+
+    const keyStats = new Map();
+    for (let i = 0; i < memberTabs.length; i++) {
+      for (const [k, val] of Object.entries(qMaps[i])) {
+        const stat = keyStats.get(k) || { key: k, count: 0, values: new Map() };
+        stat.count += 1;
+        const arr = stat.values.get(val) || [];
+        arr.push(i);
+        stat.values.set(val, arr);
+        keyStats.set(k, stat);
+      }
+    }
+    const rankedKeys = [];
+    for (const stat of keyStats.values()) {
+      const distinct = stat.values.size;
+      const isPriority = AGGREGATION_PRIORITY_QUERY_KEYS.has(stat.key.toLowerCase());
+      if (distinct < 2 && !(isPriority && stat.count >= 2 && segArrays.some((s, idx) => s.length > nonIdDepths[idx]))) continue;
+      let crossPairs = 0, crossDissimilar = 0;
+      const bucketsIndices = [...stat.values.values()];
+      for (let i = 0; i < bucketsIndices.length; i++) {
+        for (let j = i + 1; j < bucketsIndices.length; j++) {
+          crossPairs += 1;
+          if (localTokenJaccard(tokens[bucketsIndices[i][0]], tokens[bucketsIndices[j][0]]) < 0.65) crossDissimilar += 1;
+        }
+      }
+      const score = distinct * 20 + (isPriority ? 18 : 0) + stat.count * 4 + (crossPairs ? (crossDissimilar / crossPairs) * 25 : 0);
+      rankedKeys.push({ key: stat.key, score });
+    }
+    rankedKeys.sort((a, b) => b.score - a.score || a.key.localeCompare(b.key));
+    const queryKeys = rankedKeys.slice(0, 3).map(x => x.key);
+    const sampleUrl = cand.pattern.replace(/\*+$/, 'sample');
+    const refineTarget = compiledExisting.find(ex =>
+      matchesParsedRule(ex.parsedPattern, normalizeUrl(sampleUrl), sampleUrl, urlHostInfo(sampleUrl)),
+    ) || null;
+    const existingKeys = Array.isArray(refineTarget?.rule?.queryKeys) ? refineTarget.rule.queryKeys : [];
+    const existingKeysLower = new Set(existingKeys.map(k => k.toLowerCase()));
+    const mergedQueryKeys = refineTarget
+      ? [...existingKeys, ...queryKeys.filter(k => !existingKeysLower.has(k.toLowerCase()))].slice(0, 5)
+      : queryKeys;
+    const addedKeys = refineTarget
+      ? mergedQueryKeys.filter(k => !existingKeysLower.has(k.toLowerCase()))
+      : mergedQueryKeys;
+    const targetDepth = pathDepth !== null ? pathDepth : (refineTarget?.rule?.pathDepth ?? null);
+    const depthChanged = Boolean(refineTarget && (refineTarget.rule?.pathDepth ?? null) !== (targetDepth ?? null));
+
+    if (refineTarget && !addedKeys.length && !depthChanged) continue;
+    if (!mergedQueryKeys.length && targetDepth === null) continue;
+
+    const targetPattern = refineTarget
+      ? (refineTarget.parsedPattern?.type === 'host' ? cand.pattern : refineTarget.rule.pattern)
+      : cand.pattern;
+    const spec = parseAggregationRuleSpec({ pattern: targetPattern, pathDepth: targetDepth, queryKeys: mergedQueryKeys }, { strict: true });
+    if (!spec.ok) continue;
+    const bucketsMap = new Map();
+    let matchedCount = 0;
+    for (const t of httpTabs) {
+      const idn = resolveUrlAggregationIdentity(t.url, [spec]);
+      if (!idn.matched) continue;
+      matchedCount += 1;
+      const b = bucketsMap.get(idn.aggregationKey) || { aggregationKey: idn.aggregationKey, count: 0, sampleTitles: [] };
+      b.count += 1;
+      if (b.sampleTitles.length < 3) b.sampleTitles.push(String(t.manualTitle || t.title || t.url).slice(0, 48));
+      bucketsMap.set(idn.aggregationKey, b);
+    }
+    if (matchedCount < 2 || bucketsMap.size < 2) continue;
+
+    const hasContent = memberTabs.some(t => Boolean(t.snippet || t.cachedSummary));
+    const changes = [];
+    if (refineTarget) {
+      if (addedKeys.length) changes.push(`+${addedKeys.join(',')}`);
+      if (depthChanged) changes.push(`L${refineTarget.rule?.pathDepth ?? '自动'}→L${targetDepth ?? '自动'}`);
+      if (refineTarget.parsedPattern?.type === 'host' && targetPattern !== refineTarget.rule.pattern) changes.push('路径收敛');
+    }
+    const reasons = [];
+    if (refineTarget) {
+      if (addedKeys.length) reasons.push(`结合新开页面正文与参数，在保留「${existingKeys.join(',') || targetPattern}」基础上叠加区分参数 ${addedKeys.join('、')}`);
+      else if (depthChanged) reasons.push(`结合新开页面路径变化，将 Path 截断从 L${refineTarget.rule?.pathDepth ?? '自动'} 调整为 L${targetDepth ?? '自动'}`);
+    } else {
+      if (mergedQueryKeys.length) reasons.push(`按页面内容与参数对比，${mergedQueryKeys.join('、')} 参数对应不同空间/配置环境`);
+      if (targetDepth != null) reasons.push(`按第 ${targetDepth} 级路径聚合可合并动态详情 ID 并区分业务模块`);
+    }
+    reasons.push(hasContent ? `正文内容主题分化明显，拆为 ${bucketsMap.size} 个聚合标识后归组更精准` : `可将 ${matchedCount} 个页面清晰拆分为 ${bucketsMap.size} 个聚合桶`);
+    const score = (refineTarget ? 30 : 0) + mergedQueryKeys.length * 22 + bucketsMap.size * 14 + matchedCount * 4 + (cand.isConfigSystem ? 15 : 0);
+    out.push({
+      rule: spec.rule,
+      kind: refineTarget ? 'refine' : 'add',
+      ...(refineTarget ? { replaces: refineTarget.rule.id || refineTarget.rule.pattern, replacesList: [refineTarget.rule.id || refineTarget.rule.pattern] } : {}),
+      ...(changes.length ? { changes } : {}),
+      reason: reasons.join('，').slice(0, 120),
+      matchedCount,
+      distinctKeysCount: bucketsMap.size,
+      bucketsPreview: [...bucketsMap.values()].sort((a, b) => b.count - a.count).slice(0, 5),
+      confidence: score >= 55 ? 'high' : 'medium',
+      source: 'heuristic',
+      _score: score,
+    });
+  }
+  return out.sort((a, b) => b._score - a._score).slice(0, 5).map(({ _score: _s, ...rest }) => rest);
+}
+
+async function suggestAggregationRules({ windowId = null, useAi = true } = {}) {
+  const settings = await getSettings();
+  const existingRules = Array.isArray(settings.aggregationRules) ? settings.aggregationRules : [];
+  const tabs = await chrome.tabs.query(windowId != null ? { windowId } : {});
+  const enrichedTabs = await enrichTabsWithPageContent(tabs);
+  const localSuggestions = buildLocalAggregationSuggestions(enrichedTabs, { existingRules });
+  if (!useAi || !enrichedTabs.length) {
+    return { ok: true, source: 'heuristic', suggestions: localSuggestions };
+  }
+  const remote = await postSuggestionEndpoint(settings, '/aggregation/suggest', {
+    tabs: enrichedTabs,
+    existingRules,
+  }, 20000);
+  return remote || { ok: true, source: 'heuristic', suggestions: localSuggestions };
+}
+
+async function applyWhitelistSuggestionsBatch(items = []) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return { ok: false, message: '没有可采纳的白名单建议' };
+  const settings = await getSettings();
+  let wl = Array.isArray(settings.dedupWhitelist) ? [...settings.dedupWhitelist] : [];
+  const removeKeys = new Set();
+  const addedKeys = [];
+  for (const item of list) {
+    const raw = String(item?.rule || item || '').trim();
+    const parsed = parseWhitelistRule(raw, { strict: true });
+    if (!parsed.ok) {
+      if (list.length === 1) return { ok: false, message: parsed.message || '建议规则格式无效' };
+      continue;
+    }
+    addedKeys.push(parsed.key);
+    const reps = [
+      ...(Array.isArray(item?.replacesList) ? item.replacesList : []),
+      ...(item?.replaces ? [item.replaces] : []),
+    ];
+    for (const repRaw of reps) {
+      const rep = String(repRaw || '').trim();
+      if (!rep) continue;
+      removeKeys.add(rep);
+      const repParsed = parseWhitelistRule(rep, { strict: false });
+      if (repParsed.ok) removeKeys.add(repParsed.key);
+    }
+  }
+  if (!addedKeys.length) return { ok: false, message: '没有合法的白名单规则可应用' };
+  wl = wl.filter(u => !removeKeys.has(u));
+  wl = [...new Set([...addedKeys, ...wl])];
+  await chrome.storage.sync.set({ settings: { ...settings, dedupWhitelist: wl } });
+  return {
+    ok: true,
+    whitelist: wl,
+    rule: addedKeys[0],
+    appliedCount: addedKeys.length,
+    replaced: removeKeys.size ? [...removeKeys][0] : null,
+    replacedCount: removeKeys.size,
+  };
+}
+
+async function upsertAggregationRulesBatch(items = []) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return { ok: false, message: '没有可采纳的聚合规则' };
+  const settings = await getSettings();
+  let nextRules = Array.isArray(settings.aggregationRules) ? [...settings.aggregationRules] : [];
+  const applied = [];
+  for (const item of list) {
+    const rawRule = item?.rule && typeof item.rule === 'object' ? item.rule : item;
+    const parsed = parseAggregationRuleSpec(rawRule, { strict: true });
+    if (!parsed.ok) {
+      if (list.length === 1) return { ok: false, message: parsed.message || '聚合层级规则无效' };
+      continue;
+    }
+    const repIds = new Set(
+      [...(Array.isArray(item?.replacesList) ? item.replacesList : []), ...(item?.replaces ? [item.replaces] : [])]
+        .map(x => String(x || '').trim())
+        .filter(Boolean),
+    );
+    nextRules = [
+      parsed.rule,
+      ...nextRules.filter(r => {
+        if (!r) return false;
+        if (repIds.has(r.id) || repIds.has(r.pattern)) return false;
+        if (r.id === parsed.rule.id || r.pattern === parsed.rule.pattern) return false;
+        const prevSpec = parseAggregationRuleSpec(r, { strict: false });
+        return !prevSpec.ok || prevSpec.rule.patternKey !== parsed.rule.patternKey;
+      }),
+    ];
+    applied.push(parsed.rule);
+  }
+  if (!applied.length) return { ok: false, message: '没有合法的聚合规则可应用' };
+  nextRules = nextRules.slice(0, 40);
+  await chrome.storage.sync.set({ settings: { ...settings, aggregationRules: nextRules } });
+  return { ok: true, rule: applied[0], rules: nextRules, appliedCount: applied.length };
+}
+
+async function upsertAggregationRule(rawRule, { replaces = '' } = {}) {
+  return await upsertAggregationRulesBatch([{ rule: rawRule, replaces }]);
+}
+
+async function computeRuleOptimizationHints({ windowId = null } = {}) {
+  const settings = await getSettings();
+  const existingWhitelist = Array.isArray(settings.dedupWhitelist) ? settings.dedupWhitelist : [];
+  const existingRules = Array.isArray(settings.aggregationRules) ? settings.aggregationRules : [];
+  const [tabs, sessionData, metaRaw] = await Promise.all([
+    chrome.tabs.query(windowId != null ? { windowId } : {}),
+    chrome.storage.session?.get?.(['recentInterceptedDups', 'lastInterceptedDup']).catch(() => ({})) || Promise.resolve({}),
+    chrome.storage?.local?.get?.(TAB_META_KEY).catch(() => ({})) || Promise.resolve({}),
+  ]);
+  const tabMetaMap = metaRaw?.[TAB_META_KEY] && typeof metaRaw[TAB_META_KEY] === 'object' ? metaRaw[TAB_META_KEY] : {};
+  const recentList = Array.isArray(sessionData?.recentInterceptedDups) ? [...sessionData.recentInterceptedDups] : [];
+  if (sessionData?.lastInterceptedDup?.url && !recentList.some(r => r.url === sessionData.lastInterceptedDup.url)) {
+    recentList.unshift(sessionData.lastInterceptedDup);
+  }
+  const httpTabs = tabs.filter(t => /^https?:\/\//i.test(t.url || '')).map(t => {
+    const meta = tabMetaMap[normalizeUrl(t.url)];
+    const hint = meta?.excerpt || meta?.summary || '';
+    return {
+      id: t.id,
+      windowId: t.windowId,
+      title: meta?.title || t.title || t.url,
+      url: t.url,
+      ...(hint ? { cachedSummary: String(hint).slice(0, 200) } : {}),
+    };
+  });
+  const wlSug = buildLocalWhitelistSuggestions(httpTabs, { existingWhitelist, interceptedDups: recentList });
+  const aggSug = buildLocalAggregationSuggestions(httpTabs, { existingRules });
+  return {
+    ok: true,
+    whitelistCount: wlSug.length,
+    aggregationCount: aggSug.length,
+    totalCount: wlSug.length + aggSug.length,
+  };
 }
 
 async function findDuplicates(windowId = null) {
   const settings = await getSettings();
-  const whitelist = new Set((settings.dedupWhitelist || []).map(s => String(s || '').trim()));
+  const whitelist = buildWhitelistMatcher(settings.dedupWhitelist || []);
   const [tabs, locked] = await Promise.all([
     chrome.tabs.query(windowId ? { windowId } : {}),
     readLockedGroupIds(),
@@ -1586,7 +3132,7 @@ async function maybeInterceptDuplicateTab(tab) {
 
   const settings = await getSettings();
   if (settings.interceptDuplicates === false) return false;
-  const whitelist = new Set((settings.dedupWhitelist || []).map(s => String(s || '').trim()));
+  const whitelist = buildWhitelistMatcher(settings.dedupWhitelist || []);
   if (isUrlWhitelisted(rawUrl, whitelist)) return false;
 
   const targetKey = normalizeUrl(rawUrl);
@@ -1606,7 +3152,25 @@ async function maybeInterceptDuplicateTab(tab) {
     windowId: existing.windowId,
     at: Date.now(),
   };
-  await chrome.storage.session?.set?.({ lastInterceptedDup: record });
+  let recentInterceptedDups = [];
+  try {
+    const prev = (await chrome.storage.session?.get?.('recentInterceptedDups'))?.recentInterceptedDups;
+    if (Array.isArray(prev)) recentInterceptedDups = prev;
+  } catch { /* ignore */ }
+  const existingIdx = recentInterceptedDups.findIndex(r => r?.url === rawUrl);
+  if (existingIdx >= 0) {
+    recentInterceptedDups[existingIdx] = {
+      ...recentInterceptedDups[existingIdx],
+      count: (Number(recentInterceptedDups[existingIdx].count) || 1) + 1,
+      at: record.at,
+    };
+  } else {
+    recentInterceptedDups.unshift({ url: rawUrl, host, title: record.existingTitle, count: 1, forcedOpen: false, at: record.at });
+  }
+  await chrome.storage.session?.set?.({
+    lastInterceptedDup: record,
+    recentInterceptedDups: recentInterceptedDups.slice(0, 30),
+  });
   try { await chrome.tabs.update(existing.id, { active: true }); } catch { /* ignore */ }
   if (existing.windowId != null && chrome.windows?.update) {
     try { await chrome.windows.update(existing.windowId, { focused: true }); } catch { /* ignore */ }
@@ -2131,6 +3695,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'group-rename':
         requireLifecycleSender(sender);
         return await renameTabGroup(msg);
+      case 'tab-rename':
+        requireLifecycleSender(sender);
+        return await renameTab(msg);
       case 'group-force-close':
         requireLifecycleSender(sender);
         return await disbandAndCloseGroup(msg);
@@ -2241,20 +3808,90 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'dup-whitelist-add': {
         const settings = await getSettings();
         const raw = String(msg.url || msg.host || '').trim();
-        const key = /^https?:\/\//i.test(raw) ? normalizeUrl(raw) : raw.replace(/^www\./i, '').toLowerCase();
-        if (!key) return { ok: false, message: '域名或网址不能为空' };
-        const wl = [...new Set([...(settings.dedupWhitelist || []), key])];
+        const parsed = parseWhitelistRule(raw, { strict: true });
+        if (!parsed.ok) return { ok: false, message: parsed.message || '域名、网址或匹配规则不能为空' };
+        const wl = [...new Set([...(settings.dedupWhitelist || []), parsed.key])];
         await chrome.storage.sync.set({ settings: { ...settings, dedupWhitelist: wl } });
-        return { ok: true, whitelist: wl };
+        return { ok: true, whitelist: wl, rule: parsed.key, ruleType: parsed.type };
       }
       case 'dup-whitelist-remove': {
         const settings = await getSettings();
         const raw = String(msg.url || msg.host || '').trim();
-        const key = /^https?:\/\//i.test(raw) ? normalizeUrl(raw) : raw.replace(/^www\./i, '').toLowerCase();
+        const parsed = parseWhitelistRule(raw, { strict: false });
+        const key = parsed.ok ? parsed.key : raw;
         const wl = (settings.dedupWhitelist || []).filter(u => u !== key && u !== raw);
         await chrome.storage.sync.set({ settings: { ...settings, dedupWhitelist: wl } });
         return { ok: true, whitelist: wl };
       }
+      case 'dup-whitelist-test':
+        return await testWhitelistRule({ rule: msg.rule ?? msg.url ?? '', windowId: msg.windowId ?? null });
+      case 'dup-whitelist-suggest':
+        return await suggestWhitelistRules({ windowId: msg.windowId ?? null, useAi: msg.useAi !== false });
+      case 'dup-whitelist-apply-suggestion':
+        return await applyWhitelistSuggestionsBatch([{
+          rule: msg.rule,
+          replaces: msg.replaces || null,
+          replacesList: msg.replacesList || null,
+        }]);
+      case 'dup-whitelist-apply-all':
+        return await applyWhitelistSuggestionsBatch(msg.items || []);
+      case 'aggregation-rule-list': {
+        const settings = await getSettings();
+        return { ok: true, rules: Array.isArray(settings.aggregationRules) ? settings.aggregationRules : [] };
+      }
+      case 'aggregation-rule-add': {
+        const raw = msg.rule && typeof msg.rule === 'object'
+          ? msg.rule
+          : (typeof msg.rule === 'string' ? msg.rule : { pattern: msg.pattern, pathDepth: msg.pathDepth, queryKeys: msg.queryKeys, label: msg.label });
+        return await upsertAggregationRule(raw);
+      }
+      case 'aggregation-rule-remove': {
+        const settings = await getSettings();
+        const existingRules = Array.isArray(settings.aggregationRules) ? settings.aggregationRules : [];
+        const id = String(msg.id || '').trim();
+        const nextRules = existingRules.filter(r => r?.id !== id && r?.pattern !== id);
+        await chrome.storage.sync.set({ settings: { ...settings, aggregationRules: nextRules } });
+        return { ok: true, rules: nextRules };
+      }
+      case 'aggregation-rule-test':
+        return await testAggregationRule({
+          rule: msg.rule ?? null,
+          pattern: msg.pattern ?? '',
+          pathDepth: msg.pathDepth ?? null,
+          queryKeys: msg.queryKeys ?? '',
+          label: msg.label ?? '',
+          windowId: msg.windowId ?? null,
+        });
+      case 'aggregation-rule-suggest':
+        return await suggestAggregationRules({ windowId: msg.windowId ?? null, useAi: msg.useAi !== false });
+      case 'aggregation-rule-apply-suggestion': {
+        const raw = msg.rule && typeof msg.rule === 'object'
+          ? msg.rule
+          : { pattern: msg.pattern, pathDepth: msg.pathDepth, queryKeys: msg.queryKeys, label: msg.label };
+        return await upsertAggregationRulesBatch([{
+          rule: raw,
+          replaces: msg.replaces || '',
+          replacesList: msg.replacesList || null,
+        }]);
+      }
+      case 'aggregation-rule-apply-all':
+        return await upsertAggregationRulesBatch(msg.items || []);
+      case 'rule-optimization-hints':
+        return await computeRuleOptimizationHints({ windowId: msg.windowId ?? null });
+      case 'favorite-list':
+        return { ok: true, favorites: await readPinnedFavorites() };
+      case 'favorite-toggle':
+        return await togglePinnedFavorite({
+          url: msg.url,
+          title: msg.title,
+          pinned: typeof msg.pinned === 'boolean' ? msg.pinned : null,
+        });
+      case 'favorite-open':
+        return await openPinnedFavorite({
+          url: msg.url,
+          key: msg.key,
+          windowId: Number.isInteger(msg.windowId) ? msg.windowId : null,
+        });
       case 'page-search-pill-trigger': {
         if (sender?.id !== chrome.runtime.id || !sender.tab) throw new Error('悬浮搜索胶囊来源无效');
         if (!sender.tab.active) {
@@ -2277,6 +3914,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const windowId = Number.isInteger(msg.windowId) ? msg.windowId : await currentWindowId();
         const created = await chrome.tabs.create({ url, windowId, active: true });
         if (created?.id != null) forceOpenTabIds.add(created.id);
+        try {
+          const prev = (await chrome.storage.session?.get?.('recentInterceptedDups'))?.recentInterceptedDups;
+          const list = Array.isArray(prev) ? prev : [];
+          const idx = list.findIndex(r => r?.url === url);
+          if (idx >= 0) list[idx] = { ...list[idx], forcedOpen: true, at: Date.now() };
+          else list.unshift({ url, host: urlHostInfo(url)?.host || '', count: 1, forcedOpen: true, at: Date.now() });
+          await chrome.storage.session?.set?.({ recentInterceptedDups: list.slice(0, 30) });
+        } catch { /* ignore */ }
         await chrome.storage.session?.remove?.('lastInterceptedDup');
         return { ok: true, tabId: created?.id ?? null };
       }
@@ -2539,7 +4184,71 @@ async function handleAutoAlarm(alarm) {
   }
 }
 
+let snapshotPushTimers = new Map();
+function scheduleSnapshotPush(windowId = null) {
+  const key = windowId ?? 'active';
+  const prev = snapshotPushTimers.get(key);
+  if (prev) clearTimeout(prev);
+  const timer = setTimeout(async () => {
+    snapshotPushTimers.delete(key);
+    try {
+      const wid = windowId ?? await currentWindowId();
+      if (wid == null || typeof chrome.tabs?.query !== 'function') return;
+      const settings = await getSettings();
+      const base = safeLocalServiceUrl(settings.serviceUrl);
+      const [all, existing, locked, manualNamed, manualTitles, recentVisits, metaRaw] = await Promise.all([
+        chrome.tabs.query({ windowId: wid }),
+        chrome.tabGroups?.query ? chrome.tabGroups.query({ windowId: wid }) : Promise.resolve([]),
+        readLockedGroupIds(),
+        readManualNamedGroups(),
+        typeof readManualTabTitles === 'function' ? readManualTabTitles().catch(() => ({})) : Promise.resolve({}),
+        loadRecentVisits().catch(() => ({})),
+        chrome.storage?.local?.get?.(TAB_META_KEY).catch(() => ({})),
+      ]);
+      const tabMetaMap = metaRaw?.[TAB_META_KEY] && typeof metaRaw[TAB_META_KEY] === 'object' ? metaRaw[TAB_META_KEY] : {};
+      const groupNameById = new Map((existing || []).map(g => [g.id, g.title || '']));
+      const tabs = all.filter(t => /^https?:\/\//i.test(t.url || '')).map(t => {
+        const meta = tabMetaMap[normalizeUrl(t.url)];
+        const manual = manualTitles[t.id];
+        const manualTitle = manual?.title && (!manual.url || manual.url === normalizeUrl(t.url || '')) ? manual.title : null;
+        return {
+          id: t.id,
+          title: t.title,
+          ...(manualTitle ? { manualTitle } : {}),
+          url: t.url,
+          groupId: t.groupId ?? -1,
+          groupName: t.groupId != null && t.groupId !== -1 ? (groupNameById.get(t.groupId) || '') : '',
+          pinned: Boolean(t.pinned),
+          active: Boolean(t.active),
+          discarded: Boolean(t.discarded),
+          recentVisitAt: recentVisits[t.id] || t.lastAccessed || null,
+          ...(meta?.excerpt || meta?.summary ? { cachedSummary: String(meta.excerpt || meta.summary).slice(0, 360) } : {}),
+        };
+      });
+      const groups = (existing || []).map(g => ({
+        id: g.id,
+        name: g.title || '',
+        color: g.color,
+        pinned: manualNamed.has(g.id) || locked.has(g.id),
+        tabIds: all.filter(t => t.groupId === g.id && /^https?:\/\//i.test(t.url || '')).map(t => t.id),
+      }));
+      await fetch(`${base}/snapshot`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          windowId: wid,
+          tabs,
+          groups,
+          ...(Array.isArray(settings.aggregationRules) && settings.aggregationRules.length ? { aggregationRules: settings.aggregationRules } : {}),
+        }),
+      });
+    } catch { /* passive snapshot sync never surfaces errors */ }
+  }, 1500);
+  snapshotPushTimers.set(key, timer);
+}
+
 chrome.tabs.onCreated?.addListener(tab => {
+  if (tab?.active === true && tab?.id != null) stampRecentVisit(tab.id);
   const createdUrl = tab?.pendingUrl || tab?.url || '';
   if (tab?.id != null && (tab.active === true || tab.openerTabId != null || isNewTabPageUrl(createdUrl)) && typeof chrome.tabs?.remove === 'function') {
     newlyCreatedTabIds.set(tab.id, Date.now());
@@ -2551,13 +4260,23 @@ chrome.tabs.onUpdated?.addListener(async (id, info, tab) => {
   if (!info.url && info.status !== 'loading' && info.status !== 'complete') return;
   try {
     const liveTab = tab || await chrome.tabs.get(id);
-    if (info.url && newlyCreatedTabIds.has(id)) {
-      maybeInterceptDuplicateTab(liveTab).catch(e => console.warn('拦截重复新标签失败:', e));
+    if (info.url) {
+      pruneManualTabTitle(id, info.url).catch(() => {});
+      if (newlyCreatedTabIds.has(id)) {
+        maybeInterceptDuplicateTab(liveTab).catch(e => console.warn('拦截重复新标签失败:', e));
+      }
+    }
+    if (info.status === 'complete' && /^https?:\/\//i.test(liveTab?.url || '')) {
+      scheduleSnapshotPush(liveTab.windowId);
     }
     await queueAutoTab(liveTab, { loadStatus: info.status || null });
   } catch (e) { console.warn('排队自动整理失败:', e); }
 });
-chrome.tabs.onRemoved?.addListener(id => withAutoState(async () => {
+chrome.tabs.onRemoved?.addListener(id => {
+  newlyCreatedTabIds.delete(id);
+  forceOpenTabIds.delete(id);
+  pruneManualTabTitle(id, null).catch(() => {});
+  return withAutoState(async () => {
   await loadRestoredAutoTabs();
   if (restoredAutoTabs[id]) {
     delete restoredAutoTabs[id];
@@ -2571,7 +4290,8 @@ chrome.tabs.onRemoved?.addListener(id => withAutoState(async () => {
     await chrome.alarms?.clear?.(alarmName(row.windowId));
   }
   await persistAuto();
-}).catch(e => console.warn('清理自动整理标签失败:', e)));
+}).catch(e => console.warn('清理自动整理标签失败:', e));
+});
 chrome.windows.onRemoved?.addListener(id => withAutoState(async () => {
   if (!autoAvailable()) return;
   delete autoState.windows[id];
