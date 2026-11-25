@@ -313,3 +313,44 @@ test('outside pointerdown closes Hero dropdown and opening Cmd+K palette closes 
   assert.equal(h.dropdown.classList.contains('hidden'), true);
   assert.equal(h.palette.classList.contains('hidden'), false);
 });
+
+test('bare h promotes quick-history command, Enter switches to history + recently closed without closing, and /h isolates history', async () => {
+  const h = harness({
+    tabs: [{ id: 1, title: 'GitHub Repo', url: 'https://github.com/org/repo', groupId: 5, windowId: 1, lastAccessed: Date.now() }],
+    sessions: [
+      { lastModified: Math.floor(Date.now() / 1000), tab: { sessionId: 'sess-closed', title: 'Closed Sprint Board', url: 'https://board.example.com/sprint' } },
+    ],
+    history: [
+      { id: 'h-dup', title: 'Closed Sprint Board', url: 'https://board.example.com/sprint', lastVisitTime: Date.now() - 60000, visitCount: 4 },
+      { id: 'h-1', title: 'Archived RFC', url: 'https://rfc.example.com/12', lastVisitTime: Date.now() - 120000, visitCount: 2 },
+    ],
+  });
+  await settle();
+
+  h.search.value = 'h';
+  h.search.dispatchEvent(new FakeEvent('input'));
+  await settle();
+  const firstRow = h.heroList.querySelectorAll('.palette-row')[0];
+  assert.equal(firstRow.dataset.kind, 'cmd');
+  assert.equal(firstRow.dataset.key, 'cmd:history-search');
+
+  const enterEv = new FakeEvent('keydown', { key: 'Enter' });
+  h.search.dispatchEvent(enterEv);
+  await settle();
+  assert.equal(enterEv.defaultPrevented, true);
+  assert.equal(h.dropdown.classList.contains('hidden'), false);
+  assert.equal(h.search.value, 'h ');
+  assert.ok(h.heroCount.textContent.includes('来源：历史'));
+  const rowsAfterEnter = h.heroList.querySelectorAll('.palette-row');
+  assert.equal(rowsAfterEnter.filter(r => r.dataset.kind === 'closed').length, 1);
+  assert.equal(rowsAfterEnter.filter(r => r.dataset.kind === 'history').length, 1);
+  assert.equal(rowsAfterEnter.find(r => r.dataset.kind === 'history').dataset.key, 'history:https://rfc.example.com/12');
+
+  h.search.value = '/h Archived';
+  h.search.dispatchEvent(new FakeEvent('input'));
+  await settle();
+  const slashRows = h.heroList.querySelectorAll('.palette-row');
+  assert.equal(slashRows.length, 1);
+  assert.equal(slashRows[0].dataset.kind, 'history');
+  assert.ok(h.heroCount.textContent.includes('来源：历史'));
+});

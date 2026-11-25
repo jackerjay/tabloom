@@ -75,8 +75,9 @@
     const query = new URLSearchParams({ focusGroup: String(group.id), windowId: String(group.windowId) });
     return chrome.tabs.create({ url: chrome.runtime.getURL('home.html') + '?' + query });
   }
-  function commands() {
+  function commands(actions = null) {
     const cmds = [
+      { id: 'history-search', label: trText('快速搜索历史 (h)'), hint: trText('输入 /h 或 h 空格 搜索浏览历史与近期关闭'), ic: 'search', keepOpen: true, run: () => actions?.enterHistoryMode?.() },
       { id: 'organize', label: trText('立即整理'), hint: trText('AI 语义分组并应用'), ic: 'refresh', run: () => (document.getElementById('organize') || document.getElementById('regroup'))?.click() },
       { id: 'dedup', label: trText('一键去重'), hint: trText('关闭重复标签，可恢复'), ic: 'close', run: () => document.getElementById('dedup')?.click() },
       { id: 'undo', label: trText('撤销上次整理'), hint: trText('恢复到整理前'), ic: 'undo', run: async () => { const r = await chrome.runtime.sendMessage({ type: 'undo' }); toast(r?.ok ? '已撤销' : (r?.message || '没有可撤销的操作'), r?.ok ? 'ok' : 'err'); } },
@@ -352,6 +353,20 @@
       return true;
     }
 
+    function enterHistoryMode() {
+      input.value = 'h ';
+      try { input.setSelectionRange?.(input.value.length, input.value.length); } catch { /* ignore */ }
+      if (typeof input.oninput === 'function') {
+        try { input.oninput(); } catch { /* ignore */ }
+      }
+      selectionTouched = false;
+      cancelBookmarkSearch();
+      remoteBookmarks = [];
+      scheduleHistory();
+      refresh();
+      focusInput();
+    }
+
     function directUrlTarget(query = searchQuery()) {
       if (typeof parseDirectUrl !== 'function') return null;
       const { provider, prefix } = searchInput();
@@ -444,8 +459,10 @@
 
       const cmdItems = [];
       if (!direct) {
-        for (const c of commands()) {
-          const s = query ? scoreFields(query, [{ text: c.label, weight: 1.0 }, { text: c.hint, weight: 0.55 }]) : 1;
+        const bareH = /^h$/i.test(query);
+        for (const c of commands({ enterHistoryMode })) {
+          let s = query ? scoreFields(query, [{ text: c.label, weight: 1.0 }, { text: c.hint, weight: 0.55 }]) : 1;
+          if (c.id === 'history-search' && bareH) s = Math.max(s, 10);
           if (query && s <= 0) continue;
           cmdItems.push({ kind: 'cmd', section: 'cmd', score: s, cmd: c });
         }
@@ -461,9 +478,9 @@
       };
     }
 
-    function buildClosedItems(q, openUrls, direct = null) {
+    function buildClosedItems(q, openUrls, direct = null, forceHistoryMode = false) {
       const { provider } = searchInput();
-      if (provider !== 'all' && provider !== 'tabs') return [];
+      if (provider !== 'all' && provider !== 'tabs' && !forceHistoryMode) return [];
       const listRaw = Array.isArray(data.recentlyClosed) ? data.recentlyClosed : [];
       if (!listRaw.length) return [];
       const query = q.trim();
@@ -515,7 +532,7 @@
         if (!url || isOwnSearch(url) || !/^https?:/.test(url)) continue;
         if (seen.has(url)) continue;
         seen.add(url);
-        if (provider === 'all' && openUrls?.has(url)) continue;
+        if (openUrls?.has(url) && (provider === 'all' || !query)) continue;
         const meta = typeof resolveTabDisplayTitle === 'function' ? resolveTabDisplayTitle({ title: h.title, url }, tabMeta) : (h.title || url);
         const summary = typeof resolveTabSummary === 'function' ? resolveTabSummary({ url }, tabMeta) : '';
         const displayTitle = meta || cleanTitle(h.title || url, url);
@@ -622,7 +639,7 @@
       for (const b of pool) {
         const url = String(b?.url || '');
         if (!/^https?:\/\//.test(url) || isOwnSearch(url) || seen.has(url)) continue;
-        if (provider === 'all' && openUrls?.has(url)) continue;
+        if (openUrls?.has(url) && (provider === 'all' || !query)) continue;
         seen.add(url);
         const title = String(b.title || domainOf(url) || url);
         const folderPath = String(b.folderPath || '');
@@ -651,7 +668,14 @@
       const { provider } = searchInput();
       const query = q.trim();
       const direct = directUrlTarget(query);
-      if (provider === 'history') return buildHistoryItems(q, null, typeof parseDirectUrl === 'function' ? parseDirectUrl(query) : null);
+      if (provider === 'history') {
+        if (!query) {
+          const closed = buildClosedItems(q, null, null, true);
+          const closedUrls = new Set(closed.map(it => it.item?.url).filter(Boolean));
+          return [...closed, ...buildHistoryItems(q, closedUrls, null)];
+        }
+        return buildHistoryItems(q, null, typeof parseDirectUrl === 'function' ? parseDirectUrl(query) : null);
+      }
       if (provider === 'bookmarks') return buildBookmarkItems(q, null, typeof parseDirectUrl === 'function' ? parseDirectUrl(query) : null);
       const directItem = buildDirectItem(direct);
       const { recentItems, tabItems, groupItems, cmdItems, openUrls } = buildNativeItems(q, direct, directItem?.matchedTab?.id ?? null);
@@ -664,6 +688,13 @@
         ? [directItem, ...recentItems, ...closedItems, ...tabItems, ...favItems]
         : [...recentItems, ...closedItems, ...tabItems, ...favItems];
       if (!query) return [...out, ...bookmarkItems, ...historyItems, ...groupItems, ...cmdItems];
+      if (/^h$/i.test(query) && !direct) {
+        const histIdx = cmdItems.findIndex(it => it.cmd.id === 'history-search');
+        if (histIdx >= 0) {
+          const [histCmd] = cmdItems.splice(histIdx, 1);
+          out.splice(directItem ? 1 : 0, 0, histCmd);
+        }
+      }
       if (bookmarkItems.length) out.push(...bookmarkItems);
       if (historyItems.length) out.push(...historyItems);
       if (!isEffectiveStandalone()) out.push(...groupItems, ...cmdItems);
@@ -739,9 +770,9 @@
       const isEn = typeof getUiLang === 'function' && getUiLang() === 'en';
       const { query: q, provider, prefix } = searchInput();
       const emptyPrefixHint = prefix && !q ? trText(`请输入${SOURCE_LABEL[provider]}搜索词`) : '';
+      const hintText = isEn ? 'b Bookmarks · h / /h History · g Google' : PREFIX_HINT;
       if (opts.updatePlaceholder) {
         const placeholder = provider === 'all' ? trText('搜索标签、书签或浏览历史…') : provider === 'tabs' ? trText('搜索标签、分组或命令…') : provider === 'bookmarks' ? trText('搜索书签…') : provider === 'history' ? trText('搜索浏览历史…') : trText(`输入${SOURCE_LABEL[provider]}搜索词…`);
-        const hintText = isEn ? 'b: Bookmarks · h: History · g: Google' : PREFIX_HINT;
         input.setAttribute('placeholder', isEn ? `${placeholder} (${hintText})` : `${placeholder}（${PREFIX_HINT}）`);
       }
       const favKeys = favoriteKeySet();
@@ -906,7 +937,7 @@
         list.appendChild(li);
       }
       const baseStatus = authorizationFailed ? trText('搜索浮层未授权，请关闭后重试') : loading ? trText('正在加载…') : loadFailed ? trText('标签加载失败，请关闭后重试') : view.length ? trText(`${view.length} 项`) : emptyPrefixHint || trText('没有匹配的结果');
-      countEl.textContent = [baseStatus, trText(`来源：${SOURCE_LABEL[provider]}`), isEn ? 'b Bookmarks · h History · g Google' : PREFIX_HINT].filter(Boolean).join(' · ');
+      countEl.textContent = [baseStatus, trText(`来源：${SOURCE_LABEL[provider]}`), isEn ? 'b Bookmarks · h / /h History · g Google' : PREFIX_HINT].filter(Boolean).join(' · ');
       paintSel();
     }
 
@@ -1029,6 +1060,11 @@
       selectionTouched = true;
       if (it.kind === 'url' || it.kind === 'favorite' || it.kind === 'bookmark' || it.kind === 'closed' || it.kind === 'history' || it.kind === 'google' || (isEffectiveStandalone() && it.kind === 'tab')) {
         openDestination(it);
+        return;
+      }
+      if (it.kind === 'cmd' && it.cmd.keepOpen) {
+        try { Promise.resolve(it.cmd.run()).catch(() => toast('操作失败，请重试', 'err')); }
+        catch { toast('操作失败，请重试', 'err'); }
         return;
       }
       close(false);

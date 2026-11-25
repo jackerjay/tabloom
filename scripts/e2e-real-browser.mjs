@@ -552,15 +552,24 @@ try {
   await until(() => home.eval(`document.getElementById('palette')?.classList.contains('hidden')`), '#palette did not close after history test');
   console.log('PASS [E2E] Real Chrome browsing history surfaces in omnibox and h prefix isolates history cleanly');
 
-  // Test 5.9: Hero search inline dropdown parity with Cmd+K + Chrome recent/history records
+  // Test 5.9: Hero search inline dropdown parity with Cmd+K + Chrome recent/history records + h / /h commands
   await home.click('#search');
   await until(() => home.eval(`!document.getElementById('heroSearchDropdown')?.classList.contains('hidden') && document.querySelectorAll('#heroPaletteList .palette-row').length >= 1`), 'Hero search dropdown did not open with recent/tab items on click');
   await home.eval(`(() => {
     const s = document.getElementById('search');
-    s.value = 'h history-archived-omnibox';
+    s.value = 'h';
     s.dispatchEvent(new Event('input', { bubbles: true }));
   })()`);
-  await until(() => home.eval(`document.querySelectorAll('#heroPaletteList .palette-row').length === 1 && document.querySelector('#heroPaletteList .palette-row').dataset.kind === 'history' && document.getElementById('heroPaletteCount').textContent.includes('来源：历史')`), 'Hero inline search dropdown did not match h prefix history isolation');
+  await until(() => home.eval(`document.querySelector('#heroPaletteList .palette-row')?.dataset.key === 'cmd:history-search'`), 'Bare h did not promote quick-history command row');
+  await home.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await home.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await until(() => home.eval(`document.getElementById('search').value === 'h ' && !document.getElementById('heroSearchDropdown').classList.contains('hidden') && document.getElementById('heroPaletteCount').textContent.includes('来源：历史')`), 'Enter on quick-history command did not transition to history mode inline');
+  await home.eval(`(() => {
+    const s = document.getElementById('search');
+    s.value = '/h history-archived-omnibox';
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await until(() => home.eval(`document.querySelectorAll('#heroPaletteList .palette-row').length === 1 && document.querySelector('#heroPaletteList .palette-row').dataset.kind === 'history' && document.getElementById('heroPaletteCount').textContent.includes('来源：历史')`), 'Hero inline search dropdown did not match /h prefix history isolation');
   const heroOverlayCheck = await home.eval(`(() => {
     const dd = document.getElementById('heroSearchDropdown').getBoundingClientRect();
     const tb = document.querySelector('.toolbar-zone').getBoundingClientRect();

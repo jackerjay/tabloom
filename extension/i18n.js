@@ -327,6 +327,9 @@
     ['自动整理新标签（30s 防抖）', 'Auto-group new tabs (30s debounce)'],
     ['打开首页工作台', 'Open TabLoom Workbench'],
     ['打开 AI 侧边栏', 'Open TabLoom Side Panel'],
+    ['快速搜索历史 (h)', 'Quick History Search (h)'],
+    ['输入 /h 或 h 空格 搜索浏览历史与近期关闭', 'Type /h or h + space for browsing history & recently closed'],
+    ['请输入历史搜索词', 'Enter history search keywords'],
 
     // Command+K Palette
     ['网址直达', 'Direct URL'],

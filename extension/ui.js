@@ -112,6 +112,8 @@ function analysisSummary(result) {
 function parseSearchInput(value, fallbackProvider = 'all') {
   const raw = String(value ?? '');
   const base = ['all', 'tabs', 'bookmarks', 'history', 'google'].includes(fallbackProvider) ? fallbackProvider : 'all';
+  const slashHistory = raw.match(/^\s*\/h(?:\s+([\s\S]*))?$/i);
+  if (slashHistory) return { query: (slashHistory[1] ?? '').trim(), provider: 'history', prefix: 'h' };
   const match = raw.match(/^\s*([bhg])\s+([\s\S]*)$/i);
   if (!match) return { query: raw.trim(), provider: base, prefix: null };
   const cmd = match[1].toLowerCase();
