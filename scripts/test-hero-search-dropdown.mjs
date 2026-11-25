@@ -11,6 +11,12 @@ const parserEnd = uiSource.indexOf('/* Search command diagnostics', parserStart)
 const paletteSource = await readFile(new URL('../extension/palette.js', import.meta.url), 'utf8');
 const source = uiSource.slice(parserStart, parserEnd) + '\n' + paletteSource;
 
+function loadVectorScorer() {
+  const ctx = vm.createContext({ URL });
+  vm.runInContext(uiSource.slice(parserStart, parserEnd), ctx);
+  return ctx.vectorSearchScore;
+}
+
 const settle = async () => { for (let i = 0; i < 24; i++) await Promise.resolve(); };
 const escapeHtml = value => String(value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 
@@ -353,4 +359,46 @@ test('bare h promotes quick-history command, Enter switches to history + recentl
   assert.equal(slashRows.length, 1);
   assert.equal(slashRows[0].dataset.kind, 'history');
   assert.ok(h.heroCount.textContent.includes('来源：历史'));
+});
+
+test('dotted domain queries rank open tabs ahead of closed SSO redirects, suppress duplicate closed titles, and keep domain + sleep pill untruncated', async () => {
+  const vectorSearchScore = loadVectorScorer();
+  assert.equal(
+    vectorSearchScore('one.b', [
+      { text: '授权', weight: 1 },
+      { text: 'https://accounts.example.org/login?client=open&next=b', weight: 0.48 },
+    ]),
+    0,
+    'dotted token must not scatter-match unrelated URL query characters',
+  );
+
+  const h = harness({
+    tabs: [
+      { id: 10, title: 'OpenDot Workspace Config', url: 'https://one.app.example/workspace', groupId: 7, windowId: 1, discarded: true, lastAccessed: Date.now() - 3600000 },
+    ],
+    groups: [{ id: 7, title: 'OpenDotWorkspace', windowId: 1 }],
+    sessions: [
+      { lastModified: Math.floor((Date.now() - 60000) / 1000), tab: { sessionId: 's1', title: '无权限访问', url: 'https://sso.example.org/deny?next=https://one.app.example/a' } },
+      { lastModified: Math.floor((Date.now() - 120000) / 1000), tab: { sessionId: 's2', title: '无权限访问', url: 'https://sso.example.org/deny?next=https://one.app.example/b' } },
+      { lastModified: Math.floor((Date.now() - 30000) / 1000), tab: { sessionId: 's3', title: 'Closed One Workspace', url: 'https://one.app.example/closed' } },
+    ],
+  });
+  await settle();
+
+  h.search.value = 'one.a';
+  h.search.dispatchEvent(new FakeEvent('input'));
+  await settle();
+  const rows = h.heroList.querySelectorAll('.palette-row');
+  assert.equal(rows[0].dataset.kind, 'tab', 'open tab must outrank closed sessions');
+  assert.ok(!rows.some(r => r.dataset.kind === 'closed' && r.dataset.key.includes('sso.example.org')), 'SSO redirect query params should not hijack closed matches');
+  assert.equal(rows.filter(r => r.dataset.kind === 'closed').length, 1);
+
+  h.search.value = '';
+  h.search.dispatchEvent(new FakeEvent('input'));
+  await settle();
+  const closedRows = h.heroList.querySelectorAll('.palette-row').filter(r => r.dataset.kind === 'closed');
+  assert.equal(closedRows.filter(r => r._html.includes('无权限访问')).length, 1, 'duplicate closed title+host rows collapse to one');
+  const openRow = h.heroList.querySelectorAll('.palette-row').find(r => r.dataset.kind === 'tab');
+  assert.match(openRow._html, /palette-tag-sleep">已休眠<\/span>/);
+  assert.match(openRow._html, /2分钟前 · one\.app\.example/);
 });

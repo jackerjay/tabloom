@@ -310,11 +310,12 @@ function vectorSearchScore(query, fields) {
   let tokenScoreSum = 0;
   for (const tok of tokens) {
     let bestTok = 0;
+    const allowSubseq = tok.length >= 2 && /^[a-z0-9\u4e00-\u9fff]+$/i.test(tok);
     for (const { raw, weight } of hays) {
       let s = 0;
       if (raw.startsWith(tok)) s = 1.0 * weight;
       else if (raw.includes(tok)) s = 0.8 * weight;
-      else if (tok.length >= 2 && scoreSubsequence(raw, tok)) s = 0.4 * weight;
+      else if (allowSubseq && weight >= 0.55 && raw.length <= 96 && scoreSubsequence(raw, tok)) s = 0.4 * weight;
       if (s > bestTok) bestTok = s;
     }
     if (bestTok > 0) {

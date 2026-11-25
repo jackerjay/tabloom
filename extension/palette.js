@@ -377,6 +377,15 @@
       return Math.max(Number(t?.lastAccessed) || 0, Number(data.recentVisits?.[t?.id]) || 0);
     }
 
+    function searchableUrlOriginPath(url) {
+      try {
+        const u = new URL(url);
+        return u.hostname + (u.pathname === '/' ? '' : u.pathname);
+      } catch {
+        return String(url || '');
+      }
+    }
+
     function buildNativeItems(q, direct = null, excludeTabId = null) {
       const { provider } = searchInput();
       if (provider === 'bookmarks' || provider === 'google' || provider === 'history') {
@@ -412,7 +421,8 @@
                 { text: summary, weight: 0.85 },
                 { text: t.title && t.title !== title ? t.title : '', weight: 0.75 },
                 ...(isEffectiveStandalone() ? [{ text: groupTitle, weight: 0.6 }] : []),
-                { text: t.url, weight: 0.4 },
+                { text: searchableUrlOriginPath(t.url), weight: 0.58 },
+                { text: t.url, weight: 0.32 },
               ])
             : 1;
         if ((query || direct) && s <= 0) continue;
@@ -485,6 +495,7 @@
       if (!listRaw.length) return [];
       const query = q.trim();
       const tabMeta = data.tabMeta || {};
+      const seenTitleHost = new Set();
       const items = [];
       for (const c of listRaw) {
         const url = String(c?.url || '');
@@ -493,6 +504,9 @@
         const meta = typeof resolveTabDisplayTitle === 'function' ? resolveTabDisplayTitle({ title: c.title, url }, tabMeta) : (c.title || url);
         const summary = typeof resolveTabSummary === 'function' ? resolveTabSummary({ url }, tabMeta) : '';
         const displayTitle = meta || cleanTitle(c.title || url, url);
+        const dedupKey = `${displayTitle}\0${domainOf(url)}`;
+        if (seenTitleHost.has(dedupKey)) continue;
+        seenTitleHost.add(dedupKey);
         const s = direct
           ? (urlMatchesDirectFilter(url, direct) ? 10 : 0)
           : query
@@ -500,7 +514,7 @@
                 { text: displayTitle, weight: 1.0 },
                 { text: summary, weight: 0.8 },
                 { text: c.title && c.title !== displayTitle ? c.title : '', weight: 0.72 },
-                { text: url, weight: 0.48 },
+                { text: searchableUrlOriginPath(url), weight: 0.48 },
               ])
             : 1;
         if ((query || direct) && s <= 0) continue;
@@ -683,10 +697,10 @@
       const favItems = buildFavoriteItems(q, openUrls, direct);
       const bookmarkItems = buildBookmarkItems(q, openUrls, direct);
       const historyItems = buildHistoryItems(q, openUrls, direct);
-      // 严格按「网址直达(当输入为 URL) -> 最近打开 -> 最近关闭 -> 标签页 -> 置顶收藏 -> 书签 -> 浏览历史 -> 分组 -> 命令 -> Google」层级输出
+      // 严格按「网址直达(当输入为 URL) -> 最近打开 -> 标签页 -> 置顶收藏 -> 最近关闭 -> 书签 -> 浏览历史 -> 分组 -> 命令 -> Google」层级输出
       const out = directItem
-        ? [directItem, ...recentItems, ...closedItems, ...tabItems, ...favItems]
-        : [...recentItems, ...closedItems, ...tabItems, ...favItems];
+        ? [directItem, ...recentItems, ...tabItems, ...favItems, ...closedItems]
+        : [...recentItems, ...tabItems, ...favItems, ...closedItems];
       if (!query) return [...out, ...bookmarkItems, ...historyItems, ...groupItems, ...cmdItems];
       if (/^h$/i.test(query) && !direct) {
         const histIdx = cmdItems.findIndex(it => it.cmd.id === 'history-search');
@@ -797,7 +811,7 @@
         li.dataset.i = i;
         li.dataset.kind = it.kind;
         li.dataset.key = itemKey(it);
-        let ic = 'info', main = '', sub = '', tag = '';
+        let ic = 'info', main = '', sub = '', tag = '', extraTags = '';
         if (it.kind === 'url') {
           ic = it.matchedTab ? 'arrowRight' : 'globe';
           if (it.matchedTab) {
@@ -816,9 +830,9 @@
         } else if (it.kind === 'tab') {
           ic = 'signal';
           main = mark(it.title, q);
-          const addr = escapeHtml(isEffectiveStandalone() ? it.tab.url : domainOf(it.tab.url));
+          const addr = mark(isEffectiveStandalone() ? it.tab.url : domainOf(it.tab.url), q);
           const ago = typeof formatRelativeAccessTime === 'function' ? formatRelativeAccessTime(tabVisitTime(it.tab), { lang: isEn ? 'en' : 'zh' }) : '';
-          sub = [ago ? escapeHtml(ago) : '', it.summary ? mark(it.summary, q) : '', addr].filter(Boolean).join(' · ');
+          sub = [ago ? escapeHtml(ago) : '', addr, it.summary ? mark(it.summary, q) : ''].filter(Boolean).join(' · ');
           tag = it.group ? escapeHtml(it.group) : trText('未分组');
           if (isEffectiveStandalone()) {
             const windows = [...new Set(data.tabs.filter(t => !t.url?.startsWith(chrome.runtime.getURL('search.html'))).map(t => t.windowId))];
@@ -828,22 +842,19 @@
           }
           if (it.tab?.discarded) {
             li.classList.add('is-discarded');
-            tag = `${tag} · ${trText('已休眠')}`;
-          }
-          if (favKeys.has(favKeyOf(it.tab.url))) {
-            tag = `${trText('置顶收藏')} · ${tag}`;
+            extraTags += `<span class="palette-tag palette-tag-sleep">${escapeHtml(trText('已休眠'))}</span>`;
           }
         } else if (it.kind === 'closed') {
           ic = 'undo';
           main = mark(it.title, q);
-          const addr = escapeHtml(isEffectiveStandalone() ? it.item.url : domainOf(it.item.url));
+          const addr = mark(isEffectiveStandalone() ? it.item.url : domainOf(it.item.url), q);
           const ago = typeof formatRelativeAccessTime === 'function' ? formatRelativeAccessTime(it.item.lastModified, { lang: isEn ? 'en' : 'zh' }) : '';
-          sub = [ago ? escapeHtml(ago) : '', it.summary ? mark(it.summary, q) : '', addr].filter(Boolean).join(' · ');
+          sub = [ago ? escapeHtml(ago) : '', addr, it.summary ? mark(it.summary, q) : ''].filter(Boolean).join(' · ');
           tag = trText('最近关闭 · 点击恢复');
         } else if (it.kind === 'favorite') {
           ic = 'starFilled';
           main = mark(it.title, q);
-          sub = escapeHtml(isEffectiveStandalone() ? it.url : domainOf(it.url));
+          sub = mark(isEffectiveStandalone() ? it.url : domainOf(it.url), q);
           tag = trText('未打开 · 点击重开');
         } else if (it.kind === 'group') {
           ic = 'chevron';
@@ -860,9 +871,9 @@
         } else if (it.kind === 'history') {
           ic = 'info';
           main = mark(it.title, q);
-          const addr = escapeHtml(isEffectiveStandalone() ? it.item.url : domainOf(it.item.url));
+          const addr = mark(isEffectiveStandalone() ? it.item.url : domainOf(it.item.url), q);
           const ago = typeof formatRelativeAccessTime === 'function' ? formatRelativeAccessTime(it.item.lastVisitTime, { lang: isEn ? 'en' : 'zh' }) : '';
-          sub = [ago ? escapeHtml(ago) : '', it.summary ? mark(it.summary, q) : '', addr].filter(Boolean).join(' · ');
+          sub = [ago ? escapeHtml(ago) : '', addr, it.summary ? mark(it.summary, q) : ''].filter(Boolean).join(' · ');
           tag = trText('浏览历史');
         } else if (it.kind === 'google') {
           ic = 'search';
@@ -881,7 +892,7 @@
           : isEffectiveStandalone() && (it.kind === 'tab' || it.kind === 'history' || it.kind === 'favorite' || it.kind === 'closed')
             ? `<img class="palette-favicon" src="${chrome.runtime.getURL('_favicon/')}?pageUrl=${encodeURIComponent(faviconUrl)}&size=32" alt="">`
             : icon(ic, 14);
-        li.innerHTML = `<span class="palette-ico">${glyph}</span><span class="palette-main"><span class="palette-title">${main}</span><span class="palette-sub">${sub}</span></span><span class="palette-tag">${tag}</span>`;
+        li.innerHTML = `<span class="palette-ico">${glyph}</span><span class="palette-main"><span class="palette-title">${main}</span><span class="palette-sub">${sub}</span></span>${extraTags}<span class="palette-tag">${tag}</span>`;
         const copyUrl = itemUrl(it);
         let favBtn = null;
         if (copyUrl && /^https?:\/\//i.test(copyUrl) && typeof li.appendChild === 'function') {
