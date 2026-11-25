@@ -12,7 +12,7 @@
   <b>English</b> · <a href="./README.zh-CN.md">简体中文</a> · <a href="./LICENSE">MIT License</a>
 </p>
 
-[Product Walkthrough](./docs/media/tabloom-walkthrough.mp4) · [1-Minute Install](#1-minute-quick-start-zero-build--one-command) · [Capabilities](#core-capabilities--solutions) · [Screenshots](#live-screenshots)
+[Product Walkthrough](./docs/media/tabloom-walkthrough.mp4) · [1-Minute Install](#1-minute-quick-start-zero-build--one-command) · [Capabilities](#core-capabilities--solutions) · [Screenshots](#live-screenshots) · [Changelog](#changelog)
 
 </div>
 
@@ -47,7 +47,7 @@
 | --- | --- | --- |
 | **Tab overload & messy groups** | Right-clicking to group manually breaks down as soon as you switch tasks | Connects to local read-only AI CLIs (`codex` / `claude`) or local endpoints (Ollama / OpenAI-compatible) to sync native Chrome tab groups semantically; supports **manual pinned group names** (protected from future AI renames) and active work-group pinning |
 | **Accidental group deletion** | Bulk cleanup risks deleting key work tabs; closed tabs are hard to recover | **Per-group lock toggle** (blocks auto-cleanup, dedup, and AI reassignment); every group offers two quick-close actions: **Save & Close (Reopenable Archive)** or **Dissolve & Close All Tabs** |
-| **Slow tab, bookmark & URL lookup** | Hunting tab-by-tab, or clicking into tabs just to copy a URL | **`⌘K` Command Palette** auto-focuses immediately on open, with **smart direct URL jump**, **one-click Copy URL (`⌘C` / `⌘⇧C`)**, local millisecond `b ` (Bookmarks) / `h ` (History) lookup, plus explicit `g ` Google Search shortcut |
+| **Slow tab, bookmark & URL lookup** | Hunting tab-by-tab, or clicking into tabs just to copy a URL | **Unified `⌘K` Command Palette & Hero Inline Dropdown**: auto-focuses cleanly with **smart Direct URL jump**, **Chrome recent visits & recently closed session restore**, **Copy URL (`⌘C` / `⌘⇧C`)**, local millisecond `b` (Bookmarks) & `h` / `/h` (History) search, plus explicit `g ` Google search |
 | **Masonry drag jitter & sidebar sync** | Multi-column cards snap awkwardly while dragging; sidebar falls out of sync on tab switch | Built with **SortableJS 1.15.7** (`220ms` animation debounce & `14px` hysteresis); Side Panel listens to window focus, visibility, and tab activation to scroll the active tab smoothly into center view |
 | **Duplicate tabs & memory bloat** | Pressing `⌘T` stacks duplicate workspaces; hibernated tabs look identical to active ones | `chrome.tabs.onCreated` intercepts duplicate URLs in real time and **enforces at most 1 New Tab / Workbench per window**; customizable idle hibernation (**5 min ~ 30 days**) adds a **dashed grey outer ring + Sleeping badge**, plus 7-day cleanup hints |
 | **Local privacy & speed** | Cloud tab managers require uploading full browsing history and credentials | **Local-First architecture**: Chrome Native Messaging wakes the local `127.0.0.1:8787` Node daemon & read-only CLI on demand; AI short titles and summaries are cached locally (`< 5ms` reuse) |
@@ -71,16 +71,16 @@ Every new tab opens directly into the TabLoom Workbench synced live with Chrome'
   <sub>▲ Demo: Inline manual group rename pin, single-group lock protection, dual close options & archive restoration</sub>
 </p>
 
-### 2. ⌘K Direct URL Jump & `b`/`h` Bookmark & History Search
+### 2. Hero Inline Dropdown, ⌘K Direct URL Jump & `b`/`h`/`/h` Search
 
-Press `⌘K` to launch the cross-source command palette: paste any URL (with or without `https://`) to promote **Direct URL** at the top (switches to already-open tabs or opens new ones with quick Copy URL); type **`b `** or **`h `** to target Chrome Bookmarks or Browsing History immediately.
+Both the Workbench Hero search bar and `⌘K` palette now share the same engine: clicking or typing expands a live inline dropdown directly below the source chips. Use **`b `** to search Chrome Bookmarks or **`h` / `/h`** to search **recently closed sessions + Chrome Browsing History**.
 
 <div align="center">
 <table>
   <thead>
     <tr>
-      <th align="center" width="50%">⌘K Direct URL Detection & Quick Copy</th>
-      <th align="center" width="50%"><code>h</code> / <code>b</code> Prefix History & Bookmark Search</th>
+      <th align="center" width="50%">⌘K Direct URL Detection & Sleeping Badges</th>
+      <th align="center" width="50%"><code>h</code> / <code>/h</code> Recently Closed & History Search</th>
     </tr>
   </thead>
   <tbody>
@@ -92,7 +92,7 @@ Press `⌘K` to launch the cross-source command palette: paste any URL (with or 
 </table>
 </div>
 
-### 3. SortableJS Zero-Jitter Masonry Drag
+### 3. SortableJS Zero-Jitter Masonry Drag & Unified Search
 
 Hold any sortable group header to reorder cards: a crisp grey placeholder marks the drop target with zero horizontal jitter, syncing native Chrome tab group order on release.
 
@@ -101,9 +101,9 @@ Hold any sortable group header to reorder cards: a crisp grey placeholder marks 
 </p>
 
 <p align="center">
-  <img src="./docs/media/demo-drag-and-search.gif" alt="SortableJS card reorder and Command Palette URL/History search GIF" width="90%" />
+  <img src="./docs/media/demo-drag-and-search.gif" alt="SortableJS card reorder, Hero inline dropdown, and Bookmarks/History search GIF" width="90%" />
   <br />
-  <sub>▲ Demo: SortableJS zero-jitter group drag-and-drop, <code>⌘K</code> direct URL jump & <code>h</code> history search</sub>
+  <sub>▲ Demo (Latest): SortableJS zero-jitter group drag-and-drop, Workbench Hero inline dropdown, <code>h</code>/<code>/h</code> session restore, <code>b</code> bookmark search & direct URL jump</sub>
 </p>
 
 ### 4. Native Chrome Side Panel (Settings & Live Tab List Modes)
@@ -188,6 +188,23 @@ git clone https://github.com/jackerjay/tabloom.git ~/tabloom && ~/tabloom/instal
 > **Permissions note:** `<all_urls>` and `scripting` are used strictly on demand to extract the active page's short snippet for semantic grouping and to mount the optional shadow-DOM floating `⌘K` pill (`127.0.0.1`-only daemon with strict `Host`/`Origin` validation).
 
 Once running, the top-right status badge switches to **Daemon Online** alongside your active local CLI / model.
+
+---
+
+## Changelog
+
+### 2026-11-25 · Unified Hero Search Dropdown & Chrome Session Recovery
+- **Hero Inline Search Parity with `⌘K`**: Typing, clicking, or pressing `↓` in the Workbench Hero input opens an inline dropdown powered by the exact same engine as `⌘K`, keeping source chips interactive alongside keyboard navigation, Copy URL (`⌘C`), and Favorite pinning.
+- **Chrome Recently Closed Restore (`chrome.sessions`) & Ranking Polish**: Searches Chrome recently closed tabs and windows with one-click native session restore; open tabs always outrank closed redirects, dotted host queries avoid query-string scatter false positives, and hibernated badges render cleanly without character clipping.
+- **Quick `h` & `/h` History Commands**: Added `/h` instant prefix support and a pinned **Quick History Search (`h`)** command row that switches cleanly into `h ` history mode showing recently closed + browsing history.
+
+### 2026-11-24 · Side Panel Performance & Remote Self-Update
+- **Responsive Side Panel Overhaul**: Eliminated full-DOM rebuilds via incremental diff patching, removed the 210ms click delay, and replaced repeated inline SVGs with lightweight sprite references.
+- **GitHub Remote Update Check & Daemon Self-Restart**: Added periodic update polling with badge indicators on Settings / Check Update and confirmed pull + `LaunchAgent` daemon auto-restart, plus a one-command `./install.sh` installer.
+
+### 2026-11-23 · Content-Aware AI Aggregation & Rule Iteration
+- **One-Click Apply & Iterative Optimization**: AI rule suggestions combine newly opened tabs with existing dedup/aggregation rules and unify Path depth selectors with `SearchableSelect`.
+- **Quick Locate Active Tab**: Added a one-click Side Panel button to scroll the active tab into center view, plus pinned favorites strip synchronization.
 
 ---
 

@@ -12,7 +12,7 @@
   <a href="./README.md">English</a> · <b>简体中文</b> · <a href="./LICENSE">MIT License</a>
 </p>
 
-[产品实操演示](./docs/media/tabloom-walkthrough.mp4) · [1 分钟一键安装](#1-分钟快速安装零构建--一行命令) · [核心能力](#核心能力与场景解法) · [实机截图展示](#实机截图一览)
+[产品实操演示](./docs/media/tabloom-walkthrough.mp4) · [1 分钟一键安装](#1-分钟快速安装零构建--一行命令) · [核心能力](#核心能力与场景解法) · [实机截图展示](#实机截图一览) · [更新日志](#更新日志)
 
 </div>
 
@@ -71,28 +71,28 @@
   <sub>▲ 动图演示：分组内联重命名固定（「React 19 核心重构」）、单组加锁防自动清理、快速关闭双选项与工作空间恢复</sub>
 </p>
 
-### 2. ⌘K URL 自动直达 & `b`/`h` 地址栏式书签/历史检索
+### 2. 首页 Hero 内联下拉 & ⌘K URL 直达、`b`/`h`/`/h` 书签与历史检索
 
-按 `⌘K` 打开跨源命令面板：贴入任意网址（含省略协议域名）自动在顶部高亮 **「网址直达」**，已打开网页直接切换激活、未打开一键开启，支持一键复制链接；输入 **`b `** 或 **`h `** 直接定向检索 Chrome 书签或浏览历史。
+工作台 Hero 搜索框与 `⌘K` 全局面板共享同一检索引擎：点击或输入即展开内联下拉框，上方来源胶囊可随时点选切换；输入 `b ` 直达 Chrome 书签，输入 `h` 或 `/h` 即可检索 **最近关闭会话（`sessions.restore` 恢复）+ Chrome 浏览历史**。
 
 <div align="center">
 <table>
   <thead>
     <tr>
-      <th align="center" width="50%">⌘K URL 自动识别直达</th>
-      <th align="center" width="50%"><code>h</code> / <code>b</code> 关键字定向检索浏览历史与书签</th>
+      <th align="center" width="50%">⌘K URL 自动识别直达 & 独立「已休眠」徽章</th>
+      <th align="center" width="50%"><code>h</code> / <code>/h</code> 近期关闭与 Chrome 浏览历史检索</th>
     </tr>
   </thead>
   <tbody>
     <tr>
       <td align="center"><img src="./docs/images/palette-omnibox.png" alt="⌘K URL 自动直达" width="100%" /></td>
-      <td align="center"><img src="./docs/images/palette-history.png" alt="h 前缀历史检索" width="100%" /></td>
+      <td align="center"><img src="./docs/images/palette-history.png" alt="h 前缀历史与近期关闭检索" width="100%" /></td>
     </tr>
   </tbody>
 </table>
 </div>
 
-### 3. SortableJS 零抖动瀑布流拖拽（实体灰卡占位）
+### 3. SortableJS 零抖动瀑布流拖拽 & Hero/⌘K 多源搜索实机演示
 
 按住任意可排序分组标题栏拖动即可调整位置：目标位置展示清晰的灰色卡片占位轮廓，全程零横向挤压抖动，松手即时同步浏览器垂直/顶部标签组顺序。
 
@@ -101,9 +101,9 @@
 </p>
 
 <p align="center">
-  <img src="./docs/media/demo-drag-and-search.gif" alt="零抖动灰卡拖拽排序与 ⌘K URL 直达/历史检索 GIF 演示" width="90%" />
+  <img src="./docs/media/demo-drag-and-search.gif" alt="零抖动灰卡拖拽排序与 Hero 内联搜索 / 书签 / h 历史检索 GIF 演示" width="90%" />
   <br />
-  <sub>▲ 动图演示：SortableJS 灰卡占位零抖动拖拽排序、<code>⌘K</code> URL 自动识别直达与 <code>h</code> 历史检索</sub>
+  <sub>▲ 动图演示（最新录屏）：零抖动灰卡拖拽排序、工作台 Hero 内联下拉搜索、<code>h</code>/<code>/h</code> 近期关闭恢复、<code>b</code> 书签与 URL 直达</sub>
 </p>
 
 ### 4. 原生侧边栏 Sidepanel 三栏联动（全量设置 & 实时分组视图）
@@ -188,6 +188,23 @@ git clone https://github.com/jackerjay/tabloom.git ~/tabloom && ~/tabloom/instal
 > **权限说明**：`<all_urls>` 与 `scripting` 仅在工作需要时用于提取当前标签页摘要（用于本地/CLI 语义归组）及渲染可关闭的 Shadow DOM 右侧悬浮 `⌘K` 胶囊；本地服务强制校验本机 `127.0.0.1` 回环地址与可信扩展来源 `Origin`。
 
 运行成功后，工作台右上角将显示 **「守护服务已连接」** 与当前激活的本地 CLI 模型。
+
+---
+
+## 更新日志
+
+### 2026-11-25 · 搜索统一化、Chrome 近期会话恢复与 `h` / `/h` 命令
+- **工作台 Hero 搜索与 `⌘K` 引擎统一**：首页 Hero 输入框支持点击/输入/`↓` 就地展开内联下拉框，保留来源切换胶囊并支持 `↑/↓/Enter` 执行、`⌘C` 复制链接及星标置顶收藏。
+- **Chrome 最近打开 / 最近关闭无缝恢复**：接入 `chrome.sessions` 近期关闭会话支持一键原生恢复；修复「打开中标签优先于近期关闭页」、点号域名长 URL 散落误匹配、重复关闭页去重与「已休眠」胶囊半字截断问题。
+- **快捷 `h` / `/h` 历史命令**：新增 `/h` 无空格指令与置顶「快速搜索历史 (`h`)」指令，空历史视图聚合展示近期关闭与浏览历史。
+
+### 2026-11-24 · 侧边栏性能重塑与 GitHub 自动更新
+- **侧边栏交互零卡顿优化**：消除高频重绘与 210ms 单击延迟、引入分组列表增量 diff 渲染，并将重复内联 SVG 统一为 `<use>` 精灵引用。
+- **GitHub 远端版本检测与守护自重启**：支持定时检测远端更新并在设置与检查更新处显示红点，确认拉取代码后 `LaunchAgent` 守护进程自动平滑重启；同步上线 `./install.sh` 一键安装脚本。
+
+### 2026-11-23 · 内容感知 AI 聚合与规则叠加优化
+- **一键批量采纳与叠加迭代**：结合新开标签持续优化已有聚合与去重拦截规则，路径深度下拉框统一样式为 `SearchableSelect`。
+- **侧边栏一键定位当前标签**：侧边栏支持一键居中定位当前浏览页面，同步新增置顶收藏条交互。
 
 ---
 
