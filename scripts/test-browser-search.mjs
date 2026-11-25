@@ -167,7 +167,7 @@ test('legacy: browser-scoped command has exact suggested keys, Chinese descripti
   assert.deepEqual(manifest.commands['search-tabs'].suggested_key, { default: 'Ctrl+K', mac: 'Command+K' });
   assert.match(manifest.commands['search-tabs'].description, /[\u4e00-\u9fff]/);
   assert.equal(Object.hasOwn(manifest.commands['search-tabs'], 'global'), false);
-  assert.deepEqual(manifest.permissions, ['tabs', 'tabGroups', 'storage', 'sidePanel', 'alarms', 'favicon', 'bookmarks', 'history', 'scripting']);
+  assert.deepEqual(manifest.permissions, ['tabs', 'tabGroups', 'storage', 'sidePanel', 'alarms', 'favicon', 'bookmarks', 'history', 'sessions', 'scripting']);
   const f = fixture();
   assert.equal(f.chrome.commands.onCommand.listeners.length, 1);
   await f.command(f.tab(11), 'unrelated-command');

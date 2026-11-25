@@ -4,7 +4,7 @@
   "version": "0.4.0",
   "description": "织页 TabLoom：连接本机多 Agent CLI，智能按主题语义分组标签页、生成摘要、防重拦截、休眠省内存并支持全局秒搜。",
   "minimum_chrome_version": "116",
-  "permissions": ["tabs", "tabGroups", "storage", "sidePanel", "alarms", "favicon", "bookmarks", "history", "scripting"],
+  "permissions": ["tabs", "tabGroups", "storage", "sidePanel", "alarms", "favicon", "bookmarks", "history", "sessions", "scripting"],
   "optional_permissions": ["nativeMessaging"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },

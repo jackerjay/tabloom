@@ -194,7 +194,7 @@ button.ghost, button.primary { display: inline-flex; align-items: center; justif
 .palette-input-row input { flex: 1; min-width: 0; border: none; background: none; color: var(--text, var(--color-ink)); font: 500 15px/1.45 var(--font-body); outline: none; }
 .palette-input-row input::placeholder { color: var(--text-3, var(--color-muted)); }
 .palette-input-row kbd { flex: none; padding: 2px 7px; border-radius: 6px; font-size: 11px; background: var(--input-bg, var(--color-paper-3)); border: 1px solid var(--border-strong, var(--color-rule-2)); color: var(--text-3, var(--color-muted)); }
-#paletteList { list-style: none; margin: 0; padding: 10px 16px 14px; max-height: min(420px, 56vh); overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+#paletteList, #heroPaletteList { list-style: none; margin: 0; padding: 10px 16px 14px; max-height: min(420px, 56vh); overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 .palette-sec { padding: 8px 14px 4px; font-size: 11px; color: var(--text-3, var(--color-muted)); font-family: var(--font-display); font-weight: 650; letter-spacing: 0.02em; }
 .palette-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px solid transparent; border-radius: 10px; cursor: pointer; transition: background-color var(--dur-micro) var(--ease-out), border-color var(--dur-micro) var(--ease-out); }
 .palette-row:hover { background: var(--hover, var(--color-paper-3)); }

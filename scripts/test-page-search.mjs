@@ -141,7 +141,7 @@ async function authorize(f, tabId = 11) {
 
 test('0.3 manifest adds only HTTP(S) search HTML WAR, no permissions or manifest content scripts', () => {
   assert.equal(manifest.version, '0.4.0');
-  assert.deepEqual(manifest.permissions, ['tabs', 'tabGroups', 'storage', 'sidePanel', 'alarms', 'favicon', 'bookmarks', 'history', 'scripting']);
+  assert.deepEqual(manifest.permissions, ['tabs', 'tabGroups', 'storage', 'sidePanel', 'alarms', 'favicon', 'bookmarks', 'history', 'sessions', 'scripting']);
   assert.deepEqual(manifest.web_accessible_resources, [{ resources: ['search.html'], matches: ['http://*/*', 'https://*/*'] }]);
   assert.equal(Object.hasOwn(manifest, 'content_scripts'), false);
 });

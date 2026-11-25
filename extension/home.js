@@ -1308,6 +1308,10 @@ async function focusGroup({ groupId, windowId }) {
   if (!id) return;
   searchTerm = '';
   $('search').value = '';
+  if ($('searchCounter')) {
+    $('searchCounter').textContent = '0 / 30';
+    $('searchCounter').classList?.remove('over');
+  }
   if (windowId != null && scope !== 'all' && Number(scope) !== Number(windowId)) {
     scope = 'all';
     await buildScopeOptions();

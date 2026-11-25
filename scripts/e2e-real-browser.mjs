@@ -552,6 +552,36 @@ try {
   await until(() => home.eval(`document.getElementById('palette')?.classList.contains('hidden')`), '#palette did not close after history test');
   console.log('PASS [E2E] Real Chrome browsing history surfaces in omnibox and h prefix isolates history cleanly');
 
+  // Test 5.9: Hero search inline dropdown parity with Cmd+K + Chrome recent/history records
+  await home.click('#search');
+  await until(() => home.eval(`!document.getElementById('heroSearchDropdown')?.classList.contains('hidden') && document.querySelectorAll('#heroPaletteList .palette-row').length >= 1`), 'Hero search dropdown did not open with recent/tab items on click');
+  await home.eval(`(() => {
+    const s = document.getElementById('search');
+    s.value = 'h history-archived-omnibox';
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await until(() => home.eval(`document.querySelectorAll('#heroPaletteList .palette-row').length === 1 && document.querySelector('#heroPaletteList .palette-row').dataset.kind === 'history' && document.getElementById('heroPaletteCount').textContent.includes('来源：历史')`), 'Hero inline search dropdown did not match h prefix history isolation');
+  const heroOverlayCheck = await home.eval(`(() => {
+    const dd = document.getElementById('heroSearchDropdown').getBoundingClientRect();
+    const tb = document.querySelector('.toolbar-zone').getBoundingClientRect();
+    const pt = document.elementFromPoint(dd.left + 40, Math.min(dd.bottom - 12, tb.top + 8));
+    return { ddHeight: dd.height, paletteOpen: !document.getElementById('palette').classList.contains('hidden'), onTop: Boolean(pt && pt.closest('#heroSearchDropdown')) };
+  })()`);
+  assert.ok(heroOverlayCheck.ddHeight > 80 && !heroOverlayCheck.paletteOpen && heroOverlayCheck.onTop, 'Hero dropdown must layer cleanly above toolbar without opening modal: ' + JSON.stringify(heroOverlayCheck));
+  await home.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await home.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await until(() => home.eval(`document.getElementById('heroSearchDropdown')?.classList.contains('hidden')`), 'Hero search dropdown did not close on Escape');
+  await home.eval(`(() => {
+    const s = document.getElementById('search');
+    s.value = '';
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('search').blur?.();
+  })()`);
+  await home.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await home.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await until(() => home.eval(`document.getElementById('heroSearchDropdown')?.classList.contains('hidden')`), 'Hero search dropdown remained open after reset');
+  console.log('PASS [E2E] Home Hero search inline dropdown synced with Cmd+K logic and Chrome recent/history');
+
   // Test 6: Real Sidepanel target verification at 368px width in both modes
   const spUrl = await home.eval(`chrome.runtime.getURL('sidepanel.html')`);
   await home.eval(`chrome.tabs.create({ url: ${JSON.stringify(spUrl)}, active: true })`);
