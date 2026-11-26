@@ -745,8 +745,6 @@ select.sel.sm {
   min-width: 0;
   max-width: 100%;
   contain: layout style;
-  content-visibility: auto;
-  contain-intrinsic-size: 1px 120px;
 }
 .sp-tabs li {
   position: relative;

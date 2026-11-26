@@ -1011,6 +1011,10 @@ try {
       const t = await chrome.tabs.create({ windowId: win.id, url: ${JSON.stringify(fixtureOrigin)} + '/?scroll-check=' + i, active: false });
       ids.push(t.id);
     }
+    for (let g = 0; g < 4; g++) {
+      const gid = await chrome.tabs.group({ tabIds: ids.slice(g * 3, g * 3 + 3) });
+      await chrome.tabGroups.update(gid, { title: 'Scroll Group ' + (g + 1) });
+    }
     return ids;
   })()`);
   assert.equal(spCreatedIds.length, 18, `Expected 18 scroll-check tabs, got ${spCreatedIds.length}`);
